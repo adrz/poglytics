@@ -26,6 +26,10 @@ dist/
 *.sqlite
 *.sqlite3
 
+# Docker volumes
+data/
+logs/
+
 # Environment files
 .env
 .env.local

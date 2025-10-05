@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: twitch-chat-clickhouse
+    ports:
+      - "18123:8123"   # HTTP interface
+      - "19000:9000"   # Native TCP interface
+    environment:
+      - CLICKHOUSE_PASSWORD=changeme
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./logs/clickhouse:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - twitch-chat-network
+
+networks:
+  twitch-chat-network:
+    driver: bridge
