@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -161,6 +162,114 @@ func (s *Subscriber) parseMessage(rawMessage string) *ChatMessage {
 	}
 }
 
+// logDisconnectionEvent logs disconnection events to a file for debugging
+func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
+	logFile := "disconnections.log"
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("Error opening log file: %v\n", err)
+		return
+	}
+	defer f.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logEntry := fmt.Sprintf("[%s] %s | Channel: %s | Message: %s\n",
+		timestamp, eventType, channel, message)
+
+	if _, err := f.WriteString(logEntry); err != nil {
+		fmt.Printf("Error writing to log file: %v\n", err)
+		return
+	}
+
+	// Also print to console for immediate visibility
+	fmt.Printf("[DISCONNECT] %s | Channel: %s | Message: %s\n", eventType, channel, message)
+}
+
+// detectDisconnectionMessage detects PART, NOTICE, or KICK messages from IRC
+func (s *Subscriber) detectDisconnectionMessage(rawMessage string) {
+	trimmed := strings.TrimSpace(rawMessage)
+
+	// Detect PART messages
+	// Format: :username!username@username.tmi.twitch.tv PART #channel
+	if strings.Contains(trimmed, " PART ") {
+		parts := strings.Fields(trimmed)
+		for i, part := range parts {
+			if part == "PART" && i+1 < len(parts) {
+				channel := parts[i+1]
+				s.logDisconnectionEvent("PART", channel, trimmed)
+
+				// Remove from connected channels
+				s.channelsMutex.Lock()
+				delete(s.connectedChannels, channel)
+				s.channelsMutex.Unlock()
+				break
+			}
+		}
+		return
+	}
+
+	// Detect KICK messages
+	// Format: :username!username@username.tmi.twitch.tv KICK #channel username :reason
+	if strings.Contains(trimmed, " KICK ") {
+		parts := strings.Fields(trimmed)
+		for i, part := range parts {
+			if part == "KICK" && i+1 < len(parts) {
+				channel := parts[i+1]
+				reason := ""
+				// Find reason after the second parameter
+				if i+3 < len(parts) {
+					reasonStart := strings.Index(trimmed, parts[i+2]) + len(parts[i+2])
+					if colonIdx := strings.Index(trimmed[reasonStart:], ":"); colonIdx != -1 {
+						reason = trimmed[reasonStart+colonIdx+1:]
+					}
+				}
+				logMsg := fmt.Sprintf("%s | Reason: %s", trimmed, reason)
+				s.logDisconnectionEvent("KICK", channel, logMsg)
+
+				// Remove from connected channels
+				s.channelsMutex.Lock()
+				delete(s.connectedChannels, channel)
+				s.channelsMutex.Unlock()
+				break
+			}
+		}
+		return
+	}
+
+	// Detect NOTICE messages
+	// Format: @msg-id=... :tmi.twitch.tv NOTICE #channel :message
+	if strings.Contains(trimmed, " NOTICE ") {
+		// Extract channel
+		noticeRe := regexp.MustCompile(`NOTICE (#\w+)`)
+		matches := noticeRe.FindStringSubmatch(trimmed)
+		if len(matches) >= 2 {
+			channel := matches[1]
+
+			// Extract the notice message
+			noticeMsg := ""
+			if colonIdx := strings.LastIndex(trimmed, ":"); colonIdx != -1 {
+				noticeMsg = trimmed[colonIdx+1:]
+			}
+
+			logMsg := fmt.Sprintf("%s | Notice: %s", trimmed, noticeMsg)
+			s.logDisconnectionEvent("NOTICE", channel, logMsg)
+
+			// Check if it's a serious notice that indicates disconnection
+			lowerNotice := strings.ToLower(noticeMsg)
+			if strings.Contains(lowerNotice, "suspend") ||
+				strings.Contains(lowerNotice, "banned") ||
+				strings.Contains(lowerNotice, "timeout") {
+				// Remove from connected channels
+				s.channelsMutex.Lock()
+				delete(s.connectedChannels, channel)
+				s.channelsMutex.Unlock()
+			}
+		}
+		return
+	}
+}
+
 // initializeTwitchClient initializes the Twitch API client with credentials
 func (s *Subscriber) initializeTwitchClient() error {
 	env, err := config.LoadEnv()
@@ -295,6 +404,9 @@ func (s *Subscriber) readChat() error {
 			}
 
 			s.NMessages++
+
+			// Detect disconnection messages (PART, NOTICE, KICK)
+			s.detectDisconnectionMessage(data)
 
 			// Parse chat message and send to async processing
 			if chatMsg := s.parseMessage(data); chatMsg != nil {
