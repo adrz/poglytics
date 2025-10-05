@@ -79,6 +79,74 @@ func NewSubscriber() *Subscriber {
 	return subscriber
 }
 
+// NewSubscriberWithDB creates a new subscriber with a shared database and Twitch client
+// Used by ConnectionPool to create multiple subscribers sharing the same resources
+func NewSubscriberWithDB(database DatabaseInterface, twitchClient *twitch.Client) *Subscriber {
+	// Random nickname for each connection
+	id := util.GenerateRandomString(5, "letters")
+	nickname := "justinfan" + util.GenerateRandomString(10, "digits")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	subscriber := &Subscriber{
+		ID:                id,
+		Server:            "irc.chat.twitch.tv",
+		Token:             "oauth",
+		Nickname:          nickname,
+		Port:              6667,
+		Channels:          []string{},
+		IsConnected:       false,
+		NMessages:         0,
+		NChannels:         0,
+		ListChannels:      make([]string, 0),
+		messageChan:       make(chan *ChatMessage, 50000), // Larger buffer for pooled connections
+		ctx:               ctx,
+		cancel:            cancel,
+		connectedChannels: make(map[string]bool),
+		scanInterval:      10 * time.Minute,
+		DB:                database,     // Use shared database
+		TwitchClient:      twitchClient, // Use shared Twitch client
+	}
+
+	// Start the database worker for this connection
+	go subscriber.dbWorkerBatch()
+
+	return subscriber
+}
+
+// NewSubscriberWithSharedChannel creates a subscriber that uses a shared message channel (for connection pool)
+func NewSubscriberWithSharedChannel(database DatabaseInterface, twitchClient *twitch.Client, sharedChan chan *ChatMessage) *Subscriber {
+	// Random nickname for each connection
+	id := util.GenerateRandomString(5, "letters")
+	nickname := "justinfan" + util.GenerateRandomString(10, "digits")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	subscriber := &Subscriber{
+		ID:                id,
+		Server:            "irc.chat.twitch.tv",
+		Token:             "oauth",
+		Nickname:          nickname,
+		Port:              6667,
+		Channels:          []string{},
+		IsConnected:       false,
+		NMessages:         0,
+		NChannels:         0,
+		ListChannels:      make([]string, 0),
+		messageChan:       sharedChan, // Use shared channel - NO local dbWorker!
+		ctx:               ctx,
+		cancel:            cancel,
+		connectedChannels: make(map[string]bool),
+		scanInterval:      10 * time.Minute,
+		DB:                database,
+		TwitchClient:      twitchClient,
+	}
+
+	// Do NOT start dbWorkerBatch - pool handles DB writes centrally
+
+	return subscriber
+}
+
 func (s *Subscriber) send(message string) error {
 	if s.Connection == nil {
 		return fmt.Errorf("connection is nil")
@@ -190,49 +258,63 @@ func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
 func (s *Subscriber) detectDisconnectionMessage(rawMessage string) {
 	trimmed := strings.TrimSpace(rawMessage)
 
+	// IRC messages have format: [:prefix] COMMAND [params...]
+	// We need to check if PART/KICK is the COMMAND (2nd field after optional prefix)
+	parts := strings.Fields(trimmed)
+	if len(parts) < 2 {
+		return
+	}
+
+	// Find the command position (after prefix if present)
+	commandIdx := 0
+	if strings.HasPrefix(parts[0], ":") {
+		commandIdx = 1
+	}
+
+	if commandIdx >= len(parts) {
+		return
+	}
+
+	command := parts[commandIdx]
+
 	// Detect PART messages
 	// Format: :username!username@username.tmi.twitch.tv PART #channel
-	if strings.Contains(trimmed, " PART ") {
-		parts := strings.Fields(trimmed)
-		for i, part := range parts {
-			if part == "PART" && i+1 < len(parts) {
-				channel := parts[i+1]
-				s.logDisconnectionEvent("PART", channel, trimmed)
+	if command == "PART" && commandIdx+1 < len(parts) {
+		channel := parts[commandIdx+1]
+		s.logDisconnectionEvent("PART", channel, trimmed)
 
-				// Remove from connected channels
-				s.channelsMutex.Lock()
-				delete(s.connectedChannels, channel)
-				s.channelsMutex.Unlock()
-				break
-			}
-		}
+		// Remove from connected channels
+		s.channelsMutex.Lock()
+		delete(s.connectedChannels, channel)
+		s.channelsMutex.Unlock()
 		return
 	}
 
 	// Detect KICK messages
 	// Format: :username!username@username.tmi.twitch.tv KICK #channel username :reason
-	if strings.Contains(trimmed, " KICK ") {
-		parts := strings.Fields(trimmed)
-		for i, part := range parts {
-			if part == "KICK" && i+1 < len(parts) {
-				channel := parts[i+1]
-				reason := ""
-				// Find reason after the second parameter
-				if i+3 < len(parts) {
-					reasonStart := strings.Index(trimmed, parts[i+2]) + len(parts[i+2])
-					if colonIdx := strings.Index(trimmed[reasonStart:], ":"); colonIdx != -1 {
-						reason = trimmed[reasonStart+colonIdx+1:]
-					}
-				}
-				logMsg := fmt.Sprintf("%s | Reason: %s", trimmed, reason)
-				s.logDisconnectionEvent("KICK", channel, logMsg)
+	if command == "KICK" && commandIdx+2 < len(parts) {
+		channel := parts[commandIdx+1]
+		kickedUser := parts[commandIdx+2]
 
-				// Remove from connected channels
-				s.channelsMutex.Lock()
-				delete(s.connectedChannels, channel)
-				s.channelsMutex.Unlock()
-				break
+		// Extract reason if present
+		reason := ""
+		if commandIdx+3 < len(parts) {
+			reasonStart := strings.Index(trimmed, kickedUser) + len(kickedUser)
+			if colonIdx := strings.Index(trimmed[reasonStart:], ":"); colonIdx != -1 {
+				reason = trimmed[reasonStart+colonIdx+1:]
 			}
+		}
+
+		logMsg := fmt.Sprintf("%s | Kicked User: %s | Reason: %s", trimmed, kickedUser, reason)
+
+		// Only log and act if WE are the ones being kicked (check against our nickname)
+		if kickedUser == s.Nickname {
+			s.logDisconnectionEvent("KICK", channel, logMsg)
+
+			// Remove from connected channels
+			s.channelsMutex.Lock()
+			delete(s.connectedChannels, channel)
+			s.channelsMutex.Unlock()
 		}
 		return
 	}
@@ -442,13 +524,47 @@ func (s *Subscriber) infiniteReadChat() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	fmt.Println("Chat reader started")
+	fmt.Printf("[%s] Chat reader started\n", s.ID)
 
 	for {
 		err := s.readChat()
 		if err != nil {
 			nFailure++
-			fmt.Printf("Error reading chat: %v\n", err)
+			fmt.Printf("[%s] Error reading chat: %v\n", s.ID, err)
+
+			// Log the disconnection to file
+			s.logDisconnectionEvent("CONNECTION_ERROR", "N/A", fmt.Sprintf("Connection error: %v", err))
+
+			// Check if it's an EOF or connection closed error
+			isEOF := strings.Contains(err.Error(), "EOF") ||
+				strings.Contains(err.Error(), "connection reset") ||
+				strings.Contains(err.Error(), "broken pipe") ||
+				strings.Contains(err.Error(), "use of closed")
+
+			// If we have EOF or connection errors, return to let pool handle reconnection
+			// (If ID starts with "conn-", we're in a pool)
+			if isEOF && strings.HasPrefix(s.ID, "conn-") {
+				fmt.Printf("[%s] Connection closed by server (EOF), returning for pool to handle reconnection\n", s.ID)
+				return // Let pool handle reconnection
+			}
+
+			// If we have EOF or connection errors and we're NOT in a pool, reconnect ourselves
+			if isEOF {
+				fmt.Println("Connection closed by server (EOF), attempting to reconnect...")
+				if reconnErr := s.reconnect(); reconnErr != nil {
+					fmt.Printf("Reconnection failed: %v\n", reconnErr)
+				} else {
+					fmt.Println("Reconnected successfully after EOF")
+					nFailure = 0
+					// Need to rejoin all channels
+					s.channelsMutex.Lock()
+					for channel := range s.connectedChannels {
+						delete(s.connectedChannels, channel)
+					}
+					s.channelsMutex.Unlock()
+					continue
+				}
+			}
 
 			// If we have buffer-related errors and multiple failures, try reconnecting
 			if nFailure > 2 && (strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds")) {
@@ -463,6 +579,10 @@ func (s *Subscriber) infiniteReadChat() {
 			}
 
 			if nFailure > 5 {
+				if strings.HasPrefix(s.ID, "conn-") {
+					fmt.Printf("[%s] Too many failures, returning for pool to handle\n", s.ID)
+					return // Let pool handle it
+				}
 				log.Fatalf("Too many failures: %v", err)
 			}
 
@@ -537,29 +657,47 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 		return
 	}
 
-	fmt.Printf("Joining %d new channels\n", len(channelsToJoin))
+	fmt.Printf("[%s] Joining %d new channels\n", s.ID, len(channelsToJoin))
 
-	// Join channels with rate limiting
-	batchSize := 100
+	// Join channels with rate limiting to avoid Twitch IRC limits
+	// Twitch allows ~50 JOIN commands per 15 seconds (conservative estimate)
+	batchSize := 100              // Join 50 channels at a time
+	batchDelay := 5 * time.Second // Wait 15 seconds between batches
+
 	for i := 0; i < len(channelsToJoin); i += batchSize {
 		end := i + batchSize
 		if end > len(channelsToJoin) {
 			end = len(channelsToJoin)
 		}
 
+		batchStart := time.Now()
+		successCount := 0
+
 		for _, channel := range channelsToJoin[i:end] {
 			if err := s.joinChannel(channel); err != nil {
-				fmt.Printf("Error joining channel %s: %v\n", channel, err)
+				fmt.Printf("[%s] Error joining channel %s: %v\n", s.ID, channel, err)
 				continue
 			}
 			s.connectedChannels[channel] = true
-			time.Sleep(10 * time.Millisecond)
+			successCount++
+			time.Sleep(10 * time.Millisecond) // Minimal delay between each JOIN
 		}
 
+		fmt.Printf("[%s] Joined %d/%d channels in batch %d/%d (%.1fs)\n",
+			s.ID, successCount, end-i, (i/batchSize)+1, (len(channelsToJoin)+batchSize-1)/batchSize, time.Since(batchStart).Seconds())
+
+		// Wait for the rest of the batch period if we finished early
 		if end < len(channelsToJoin) {
-			time.Sleep(50 * time.Millisecond)
+			elapsed := time.Since(batchStart)
+			if elapsed < batchDelay {
+				remaining := batchDelay - elapsed
+				fmt.Printf("[%s] Rate limiting: waiting %.1fs before next batch...\n", s.ID, remaining.Seconds())
+				time.Sleep(remaining)
+			}
 		}
 	}
+
+	fmt.Printf("[%s] Finished joining all channels\n", s.ID)
 }
 
 // periodicChannelDiscovery runs in the background to discover and join new channels
