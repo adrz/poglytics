@@ -971,6 +971,11 @@ func (s *Subscriber) readChat() error {
 				// Record message metric
 				metrics.RecordMessage(s.ID)
 
+				// Record parsed message type metric
+				if chatMsg.MessageType != "" {
+					metrics.RecordParsedMessage(s.ID, chatMsg.MessageType)
+				}
+
 				// Try to send to message channel (non-blocking)
 				select {
 				case s.messageChan <- chatMsg:
@@ -1188,7 +1193,6 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 				s.connectedChannels[channel] = true
 				successCount++
 			}
-			fmt.Println("Joined channels:", batch)
 			time.Sleep(1000 * time.Millisecond) // Minimal delay between batches
 		}
 
