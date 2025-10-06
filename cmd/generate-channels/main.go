@@ -206,7 +206,14 @@ func main() {
 
 		// Add channels from this page
 		for i, stream := range streamsResp.Data {
-			fmt.Printf("%d\n", len(channels)+i)
+			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
+			if stream.ViewerCount < 5 {
+				fmt.Printf("Reached channels with < 5 viewers (current: %d viewers), stopping discovery\n", stream.ViewerCount)
+				fmt.Printf("Final channel count: %d channels (all with 5+ viewers)\n", len(channels))
+				goto writeFile
+			}
+
+			fmt.Printf("%d - Channel: %s (viewers: %d)\n", len(channels)+i, stream.UserLogin, stream.ViewerCount)
 			channels = append(channels, "#"+stream.UserLogin)
 
 			if len(channels) >= maxChannels {
@@ -226,6 +233,7 @@ func main() {
 		time.Sleep(1 * time.Millisecond)
 	}
 
+writeFile:
 	fmt.Printf("Collected %d channels\n", len(channels))
 
 	// Write channels to file
