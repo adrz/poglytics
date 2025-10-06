@@ -132,6 +132,12 @@ var (
 		Help: "Total number of IRC messages received by type",
 	}, []string{"connection_id", "message_type"})
 
+	// Parsed message type metrics
+	ParsedMessagesByType = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "twitch_scraper_parsed_messages_by_type_total",
+		Help: "Total number of parsed messages by message type (PRIVMSG, CLEARCHAT, etc.)",
+	}, []string{"connection_id", "message_type"})
+
 	// Error metrics
 	ParseErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "twitch_scraper_parse_errors_total",
@@ -214,4 +220,9 @@ func UpdateConnectionStatus(connectionID string, connected bool) {
 // RecordPingPong records PING/PONG latency
 func RecordPingPong(connectionID string, latency float64) {
 	PingPongLatency.WithLabelValues(connectionID).Observe(latency)
+}
+
+// RecordParsedMessage records a successfully parsed message by its type
+func RecordParsedMessage(connectionID, messageType string) {
+	ParsedMessagesByType.WithLabelValues(connectionID, messageType).Inc()
 }

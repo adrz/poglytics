@@ -25,30 +25,38 @@
                 "value": null
               }
             ]
-          }
+          },
+          "unit": "short"
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 6,
         "x": 0,
         "y": 0
       }
     },
     {
       "id": 2,
-      "title": "Messages Per Second",
+      "title": "Messages Per Second (Rate)",
       "type": "graph",
       "targets": [
         {
-          "expr": "rate(twitch_scraper_messages_total[5m])",
+          "expr": "rate(twitch_scraper_messages_total[1m])",
+          "legendFormat": "Messages/sec",
           "refId": "A"
         }
       ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Messages/sec"
+        }
+      ],
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
+        "h": 6,
+        "w": 6,
+        "x": 6,
         "y": 0
       }
     },
@@ -62,32 +70,37 @@
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 0
       }
     },
     {
       "id": 4,
-      "title": "Connection Status",
-      "type": "table",
-      "targets": [
-        {
-          "expr": "twitch_scraper_connection_status",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      }
-    },
-    {
-      "id": 5,
       "title": "Joined Channels Total",
       "type": "stat",
       "targets": [
@@ -96,32 +109,228 @@
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      }
+    },
+    {
+      "id": 5,
+      "title": "Messages by Type (Rate)",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "sum by (message_type) (rate(twitch_scraper_parsed_messages_by_type_total[5m]))",
+          "legendFormat": "{{message_type}}",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Messages/sec"
+        }
+      ],
+      "legend": {
+        "show": true,
+        "values": true,
+        "current": true
+      },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 6
       }
     },
     {
       "id": 6,
-      "title": "Database Batch Insert Duration",
+      "title": "Messages by Type (Total Count)",
+      "type": "piechart",
+      "targets": [
+        {
+          "expr": "sum by (message_type) (twitch_scraper_parsed_messages_by_type_total)",
+          "legendFormat": "{{message_type}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": ["value", "percent"]
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      }
+    },
+    {
+      "id": 7,
+      "title": "Messages Per Connection",
       "type": "graph",
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, rate(twitch_scraper_db_batch_insert_duration_seconds_bucket[5m]))",
+          "expr": "rate(twitch_scraper_messages_per_connection_total[5m])",
+          "legendFormat": "{{connection_id}}",
           "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Messages/sec"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      }
+    },
+    {
+      "id": 8,
+      "title": "Connection Status",
+      "type": "table",
+      "targets": [
+        {
+          "expr": "twitch_scraper_connection_status",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            }
+          }
         }
       ],
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 14
       }
     },
     {
-      "id": 7,
+      "id": 9,
+      "title": "Database Write Performance",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(twitch_scraper_db_batch_insert_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(twitch_scraper_db_batch_insert_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "s",
+          "label": "Duration"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      }
+    },
+    {
+      "id": 10,
+      "title": "Database Batch Size",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(twitch_scraper_db_batch_size_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.50, rate(twitch_scraper_db_batch_size_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "B"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Batch Size"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      }
+    },
+    {
+      "id": 11,
+      "title": "Database Messages Written",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "twitch_scraper_db_messages_written_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 30
+      }
+    },
+    {
+      "id": 12,
       "title": "Database Write Errors",
       "type": "stat",
       "targets": [
@@ -130,15 +339,33 @@
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 24
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 30
       }
     },
     {
-      "id": 8,
+      "id": 13,
       "title": "Message Buffer Utilization",
       "type": "gauge",
       "targets": [
@@ -147,15 +374,39 @@
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 50
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 6,
+        "w": 6,
         "x": 12,
-        "y": 24
+        "y": 30
       }
     },
     {
-      "id": 9,
+      "id": 14,
       "title": "Messages Dropped",
       "type": "stat",
       "targets": [
@@ -164,15 +415,33 @@
           "refId": "A"
         }
       ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 32
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 30
       }
     },
     {
-      "id": 10,
+      "id": 15,
       "title": "Channel Discovery Duration",
       "type": "graph",
       "targets": [
@@ -181,45 +450,269 @@
           "refId": "A"
         }
       ],
+      "yaxes": [
+        {
+          "format": "s",
+          "label": "Duration"
+        }
+      ],
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 32
+        "w": 8,
+        "x": 0,
+        "y": 36
       }
     },
     {
-      "id": 11,
-      "title": "Ping/Pong Latency",
+      "id": 16,
+      "title": "Channels Discovered",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "twitch_scraper_channels_discovered",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Channels"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 36
+      }
+    },
+    {
+      "id": 17,
+      "title": "Channels per Connection",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "twitch_scraper_joined_channels_per_connection",
+          "legendFormat": "{{connection_id}}",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Channels"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 36
+      }
+    },
+    {
+      "id": 18,
+      "title": "Ping/Pong Latency (p95)",
       "type": "graph",
       "targets": [
         {
           "expr": "histogram_quantile(0.95, rate(twitch_scraper_ping_pong_latency_seconds_bucket[5m]))",
+          "legendFormat": "{{connection_id}}",
           "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "s",
+          "label": "Latency"
         }
       ],
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 40
+        "y": 44
       }
     },
     {
-      "id": 12,
-      "title": "Parse Errors",
-      "type": "stat",
+      "id": 19,
+      "title": "IRC Messages by Type",
+      "type": "graph",
       "targets": [
         {
-          "expr": "sum(twitch_scraper_parse_errors_total)",
+          "expr": "sum by (message_type) (rate(twitch_scraper_irc_messages_received_total[5m]))",
+          "legendFormat": "{{message_type}}",
           "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Messages/sec"
         }
       ],
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 44
+      }
+    },
+    {
+      "id": 20,
+      "title": "Parse Errors by Type",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "sum by (error_type) (rate(twitch_scraper_parse_errors_total[5m]))",
+          "legendFormat": "{{error_type}}",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Errors/sec"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 52
+      }
+    },
+    {
+      "id": 21,
+      "title": "Read Timeouts",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(twitch_scraper_read_timeouts_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 52
+      }
+    },
+    {
+      "id": 22,
+      "title": "Connection Reconnects",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(twitch_scraper_connection_reconnects_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      }
+    },
+    {
+      "id": 23,
+      "title": "Channel Join Success Rate",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "sum(rate(twitch_scraper_channel_join_attempts_total{status=\"success\"}[5m])) / sum(rate(twitch_scraper_channel_join_attempts_total[5m])) * 100",
+          "legendFormat": "Success Rate %",
+          "refId": "A"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "percent",
+          "label": "Success Rate",
+          "min": 0,
+          "max": 100
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 60
+      }
+    },
+    {
+      "id": 24,
+      "title": "Message Buffer Size vs Capacity",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "twitch_scraper_message_buffer_size",
+          "legendFormat": "Current Size",
+          "refId": "A"
+        },
+        {
+          "expr": "twitch_scraper_message_buffer_capacity",
+          "legendFormat": "Capacity",
+          "refId": "B"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Messages"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 60
       }
     }
   ],
