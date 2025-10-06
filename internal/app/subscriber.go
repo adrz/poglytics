@@ -347,12 +347,19 @@ func parsePRIVMSG(rawMessage string, tags map[string]string, parts []string, com
 
 	channel := parts[commandIdx+1]
 
-	// Extract message (everything after the second colon)
-	colonIdx := strings.Index(rawMessage, " :")
+	// Extract message (everything after " :" that follows the channel name)
+	// Format: :user!user@user.tmi.twitch.tv PRIVMSG #channel :message
+	// We need to find " :" that appears AFTER the channel name
+	channelEnd := strings.Index(rawMessage, channel)
+	if channelEnd == -1 {
+		return nil
+	}
+	// Look for " :" after the channel name
+	colonIdx := strings.Index(rawMessage[channelEnd:], " :")
 	if colonIdx == -1 {
 		return nil
 	}
-	message := rawMessage[colonIdx+2:]
+	message := rawMessage[channelEnd+colonIdx+2:]
 
 	msg := &ChatMessage{
 		MessageType: "text_message",

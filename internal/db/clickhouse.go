@@ -62,10 +62,7 @@ func (c *ClickHouseDB) InitDB() error {
 			message String,
 			channel String,
 			timestamp DateTime,
-			color String,
-			badges String,
-			bits_amount UInt32,
-			raw_message String
+			badges String
 		) ENGINE = MergeTree()
 		ORDER BY (timestamp, channel)
 		PARTITION BY toYYYYMM(timestamp)`,
@@ -328,8 +325,8 @@ func (c *ClickHouseDB) SaveTextMessages(messages []*ChatMessage) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`INSERT INTO text_messages
-		(id, nickname, display_name, user_id, message, channel, timestamp, color, badges, bits_amount, raw_message)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(id, nickname, display_name, user_id, message, channel, timestamp, badges)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
@@ -346,10 +343,7 @@ func (c *ClickHouseDB) SaveTextMessages(messages []*ChatMessage) error {
 			msg.Message,
 			msg.Channel,
 			msg.Timestamp,
-			msg.Color,
 			badges,
-			msg.BitsAmount,
-			msg.RawMessage,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert text message: %w", err)
