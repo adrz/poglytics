@@ -115,7 +115,7 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			case <-pool.ctx.Done():
 				// Process remaining messages before exiting
 				if len(batch) > 0 {
-					if err := pool.sharedDB.SaveChatMessageBatch(batch); err != nil {
+					if err := pool.saveChatMessageBatch(batch); err != nil {
 						fmt.Printf("[DB Writer] Error saving final batch: %v\n", err)
 					}
 				}
@@ -128,14 +128,20 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 				batch = append(batch, msg)
 				if len(batch) >= maxBatchSize {
 					startTime := time.Now()
-					err := pool.sharedDB.SaveChatMessageBatch(batch)
+					err := pool.saveChatMessageBatch(batch)
 					duration := time.Since(startTime).Seconds()
 
 					if err != nil {
-						fmt.Printf("[DB Writer] Error saving batch: %v\n", err)
+						fmt.Printf("[DB Writer %s] Error saving batch: %v\n", time.Now().Format("15:04:05"), err)
 						metrics.RecordDBBatchInsert(duration, len(batch), false)
 					} else {
 						metrics.RecordDBBatchInsert(duration, len(batch), true)
+
+						// Log slow batch inserts that might indicate burst pressure
+						if duration > 2.0 {
+							fmt.Printf("[DB Writer %s] ⚠️  Slow batch insert: %.2fs for %d messages (possible burst overload)\n",
+								time.Now().Format("15:04:05"), duration, len(batch))
+						}
 					}
 					batch = batch[:0] // Clear batch
 				}
@@ -143,7 +149,7 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			case <-ticker.C:
 				if len(batch) > 0 {
 					startTime := time.Now()
-					err := pool.sharedDB.SaveChatMessageBatch(batch)
+					err := pool.saveChatMessageBatch(batch)
 					duration := time.Since(startTime).Seconds()
 
 					if err != nil {
@@ -176,6 +182,45 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			}
 		}
 	}()
+}
+
+// saveChatMessageBatch converts app.ChatMessage to db.ChatMessage and saves them
+func (pool *ConnectionPool) saveChatMessageBatch(messages []*ChatMessage) error {
+	// Convert app.ChatMessage to db.ChatMessage
+	dbMessages := make([]*db.ChatMessage, len(messages))
+	for i, msg := range messages {
+		dbMessages[i] = &db.ChatMessage{
+			MessageType:      msg.MessageType,
+			Timestamp:        msg.Timestamp,
+			Channel:          msg.Channel,
+			Nickname:         msg.Nickname,
+			Message:          msg.Message,
+			UserID:           msg.UserID,
+			DisplayName:      msg.DisplayName,
+			Color:            msg.Color,
+			Badges:           msg.Badges,
+			SubPlan:          msg.SubPlan,
+			SubPlanName:      msg.SubPlanName,
+			Months:           msg.Months,
+			CumulativeMonths: msg.CumulativeMonths,
+			StreakMonths:     msg.StreakMonths,
+			IsGift:           msg.IsGift,
+			GifterName:       msg.GifterName,
+			GifterID:         msg.GifterID,
+			BanDuration:      msg.BanDuration,
+			BanReason:        msg.BanReason,
+			TargetUser:       msg.TargetUser,
+			TargetMessageID:  msg.TargetMessageID,
+			RaiderName:       msg.RaiderName,
+			ViewerCount:      msg.ViewerCount,
+			BitsAmount:       msg.BitsAmount,
+			NoticeMessageID:  msg.NoticeMessageID,
+			SystemMessage:    msg.SystemMessage,
+			RawMessage:       msg.RawMessage,
+		}
+	}
+
+	return pool.sharedDB.SaveChatMessageBatch(dbMessages)
 }
 
 // Start initializes and starts all connections in the pool
@@ -320,6 +365,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 			go func() {
 				// infiniteReadChat runs forever and handles its own reconnections
 				// But if it returns, something serious happened
+				fmt.Printf("[Connection %d] Starting chat reader...\n", connectionID)
 				subscriber.infiniteReadChat()
 				chatDone <- fmt.Errorf("infiniteReadChat exited")
 			}()
@@ -329,7 +375,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 
 			// Add staggered delay based on connection ID to prevent all connections
 			// from joining channels simultaneously (which causes message burst)
-			staggerDelay := time.Duration(connectionID*30) * time.Second
+			staggerDelay := time.Duration(connectionID*10) * time.Second
 			if staggerDelay > 0 {
 				fmt.Printf("[Connection %d] Waiting %v before joining channels (staggered start)...\n",
 					connectionID, staggerDelay)
@@ -346,7 +392,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 
 			// Join assigned channels
 			fmt.Printf("[Connection %d] Joining %d channels\n", connectionID, len(channels))
-			subscriber.joinNewChannels(channels)
+			go subscriber.joinNewChannels(channels)
 			fmt.Printf("[Connection %d] Finished joining channels\n", connectionID)
 
 			// Wait for either context cancellation or chat reader error
@@ -462,14 +508,24 @@ func (pool *ConnectionPool) reportAggregatedStats() {
 			messagesPerSecond := totalMessages - lastTotalMessages
 			lastTotalMessages = totalMessages
 
+			// Detect and log message burst spikes
+			if messagesPerSecond > 3000 {
+				fmt.Printf("🔥 [POOL STATS %s] ⚠️  MESSAGE BURST DETECTED! Messages/sec: %d (threshold: 3000)\n",
+					time.Now().Format("15:04:05"), messagesPerSecond)
+				fmt.Printf("🔥 Possible causes: 1) Channel JOIN backlog, 2) Rediscovery joining channels simultaneously, 3) High traffic event\n")
+			} else if messagesPerSecond > 1500 {
+				fmt.Printf("⚠️  [POOL STATS %s] High message rate detected: %d msg/sec (watch for buffer overflow)\n",
+					time.Now().Format("15:04:05"), messagesPerSecond)
+			}
+
 			// Update global metrics
 			metrics.MessagesPerSecond.Set(float64(messagesPerSecond))
 			metrics.JoinedChannelsTotal.Set(float64(totalChannels))
 			metrics.ActiveConnections.Set(float64(activeConnections))
 			metrics.ConnectionsTotal.Set(float64(len(pool.connections)))
 
-			fmt.Printf("[POOL STATS] Connections: %d/%d active | Messages/sec: %d | Total channels: %d | Total messages: %d\n",
-				activeConnections, len(pool.connections), messagesPerSecond, totalChannels, totalMessages)
+			fmt.Printf("[POOL STATS %s] Connections: %d/%d active | Messages/sec: %d | Total channels: %d | Total messages: %d\n",
+				time.Now().Format("15:04:05"), activeConnections, len(pool.connections), messagesPerSecond, totalChannels, totalMessages)
 
 			pool.mu.RUnlock()
 		}
@@ -548,12 +604,16 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 
 			// Note: We do NOT part from offline channels - they stay joined in case they come back online
 
-			// Distribute new channels across connections
+			// Distribute new channels across connections WITH STAGGERING
+			// This prevents message burst spikes by spacing out the JOINs
 			if len(channelsToJoin) > 0 {
 				channelsPerConn := len(channelsToJoin) / numConnections
 				if channelsPerConn == 0 {
 					channelsPerConn = 1
 				}
+
+				fmt.Printf("[Pool] ⚠️  Joining %d new channels across %d connections with staggering to prevent message burst\n",
+					len(channelsToJoin), numConnections)
 
 				pool.mu.RLock()
 				for i, conn := range pool.connections {
@@ -575,14 +635,38 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 
 					connChannels := channelsToJoin[startIdx:endIdx]
 					if len(connChannels) > 0 {
-						fmt.Printf("[%s] Assigning %d new channels\n", conn.ID, len(connChannels))
-						go conn.joinNewChannels(connChannels)
+						// Stagger channel joining across connections to prevent message burst
+						staggerDelay := time.Duration(i*15) * time.Second
+						fmt.Printf("[%s] Assigning %d new channels (will join after %v stagger delay)\n",
+							conn.ID, len(connChannels), staggerDelay)
+
+						// Capture variables for goroutine
+						connection := conn
+						channels := connChannels
+
+						go func() {
+							if staggerDelay > 0 {
+								fmt.Printf("[%s] [REDISCOVERY] Waiting %v before joining new channels to prevent message burst...\n",
+									connection.ID, staggerDelay)
+								time.Sleep(staggerDelay)
+							}
+
+							joinStart := time.Now()
+							fmt.Printf("[%s] [REDISCOVERY] Starting to join %d new channels at %s\n",
+								connection.ID, len(channels), time.Now().Format("15:04:05"))
+
+							connection.joinNewChannels(channels)
+
+							joinDuration := time.Since(joinStart)
+							fmt.Printf("[%s] [REDISCOVERY] Completed joining %d channels in %.1fs at %s\n",
+								connection.ID, len(channels), joinDuration.Seconds(), time.Now().Format("15:04:05"))
+						}()
 					}
 				}
 				pool.mu.RUnlock()
 			}
 
-			fmt.Println("[Pool] Channel rediscovery and redistribution complete")
+			fmt.Println("[Pool] Channel rediscovery and redistribution initiated (staggered joining in progress)")
 		}
 	}
 }

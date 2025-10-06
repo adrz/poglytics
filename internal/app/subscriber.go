@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,7 +36,7 @@ func NewSubscriber() *Subscriber {
 		NMessages:         0,
 		NChannels:         0,
 		ListChannels:      make([]string, 0),
-		messageChan:       make(chan *ChatMessage, 10000),
+		messageChan:       make(chan *ChatMessage, 1000000),
 		ctx:               ctx,
 		cancel:            cancel,
 		connectedChannels: make(map[string]bool),
@@ -177,6 +176,14 @@ func (s *Subscriber) connect() error {
 		fmt.Println("Connected to Twitch IRC")
 		connected = true
 	}
+	// Request IRC capabilities for tags, commands, and membership
+	// This enables us to receive:
+	// - tags: IRC v3 message tags with metadata
+	// - commands: CLEARCHAT, CLEARMSG, HOSTTARGET, NOTICE, RECONNECT, ROOMSTATE, USERNOTICE, USERSTATE
+	// - membership: JOIN, PART, MODE messages
+	if err := s.send("CAP REQ :twitch.tv/tags twitch.tv/commands"); err != nil {
+		return err
+	}
 
 	// Send authentication
 	if err := s.send(fmt.Sprintf("PASS %s", s.Token)); err != nil {
@@ -188,16 +195,16 @@ func (s *Subscriber) connect() error {
 	}
 
 	// Read authentication response with error handling for large responses
-	response, err := s.readLineWithTimeout(5 * time.Second)
-	if err != nil {
-		return err
-	}
+	// response, err := s.readLineWithTimeout(5 * time.Second)
+	// if err != nil {
+	// 	return err
+	// }
 
-	fmt.Print("Auth response:", response)
+	// fmt.Print("Auth response:", response)
 
-	if !strings.HasPrefix(response, ":tmi.twitch.tv 001") {
-		return fmt.Errorf("twitch did not accept the username-oauth combination")
-	}
+	// if !strings.HasPrefix(response, ":tmi.twitch.tv 001") {
+	// 	return fmt.Errorf("twitch did not accept the username-oauth combination")
+	// }
 
 	return nil
 }
@@ -215,23 +222,542 @@ func (s *Subscriber) joinChannel(channel string) error {
 	return nil
 }
 
-// parseMessage parses IRC PRIVMSG format into a ChatMessage struct
+// joinChannelBatch joins multiple channels in a single JOIN command
+func (s *Subscriber) joinChannelBatch(channels []string) error {
+	if len(channels) == 0 {
+		return nil
+	}
+
+	// Create comma-separated channel list
+	channelList := strings.Join(channels, ",")
+
+	if err := s.send(fmt.Sprintf("JOIN %s", channelList)); err != nil {
+		// Record failure for all channels in batch
+		for range channels {
+			metrics.RecordChannelJoin(s.ID, false)
+		}
+		return err
+	}
+
+	// Record success for all channels
+	for _, channel := range channels {
+		s.NChannels++
+		s.ListChannels = append(s.ListChannels, channel)
+		metrics.RecordChannelJoin(s.ID, true)
+	}
+
+	return nil
+}
+
+// parseTags extracts IRC tags from a message
+// Tags format: @key1=value1;key2=value2;key3=value3
+func parseTags(tagString string) map[string]string {
+	tags := make(map[string]string)
+	if tagString == "" {
+		return tags
+	}
+
+	// Remove @ prefix if present
+	tagString = strings.TrimPrefix(tagString, "@")
+
+	pairs := strings.Split(tagString, ";")
+	for _, pair := range pairs {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			// Unescape IRC tag values according to IRCv3 spec
+			value := parts[1]
+			value = strings.ReplaceAll(value, "\\s", " ")
+			value = strings.ReplaceAll(value, "\\:", ";")
+			value = strings.ReplaceAll(value, "\\n", "\n")
+			value = strings.ReplaceAll(value, "\\r", "\r")
+			value = strings.ReplaceAll(value, "\\\\", "\\")
+			tags[parts[0]] = value
+		}
+	}
+	return tags
+}
+
+// parseIRCMessage is the main parser that routes to specific message type parsers
+func parseIRCMessage(rawMessage string) *ChatMessage {
+	trimmed := strings.TrimSpace(rawMessage)
+	if trimmed == "" {
+		return nil
+	}
+
+	// Parse IRC message format: [@tags] [:prefix] COMMAND [params] [:trailing]
+	var tags map[string]string
+	remainder := trimmed
+
+	// Extract tags if present
+	if strings.HasPrefix(remainder, "@") {
+		spaceIdx := strings.Index(remainder, " ")
+		if spaceIdx > 0 {
+			tags = parseTags(remainder[0:spaceIdx])
+			remainder = strings.TrimSpace(remainder[spaceIdx+1:])
+		}
+	}
+
+	// Now parse the command
+	parts := strings.Fields(remainder)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	// Find command (skip prefix if present)
+	commandIdx := 0
+	if strings.HasPrefix(parts[0], ":") {
+		commandIdx = 1
+	}
+
+	if commandIdx >= len(parts) {
+		return nil
+	}
+
+	command := parts[commandIdx]
+
+	// Route to appropriate parser based on command
+	switch command {
+	case "PRIVMSG":
+		return parsePRIVMSG(rawMessage, tags, parts, commandIdx)
+	case "CLEARCHAT":
+		return parseCLEARCHAT(rawMessage, tags, parts, commandIdx)
+	case "CLEARMSG":
+		return parseCLEARMSG(rawMessage, tags, parts, commandIdx)
+	case "USERNOTICE":
+		return parseUSERNOTICE(rawMessage, tags, parts, commandIdx)
+	case "NOTICE":
+		return parseNOTICE(rawMessage, tags, parts, commandIdx)
+	case "HOSTTARGET":
+		return parseHOSTTARGET(rawMessage, tags, parts, commandIdx)
+	default:
+		// Log other message types for debugging
+		return &ChatMessage{
+			MessageType: "other",
+			Timestamp:   time.Now(),
+			RawMessage:  rawMessage,
+		}
+	}
+}
+
+// parsePRIVMSG parses regular chat messages
+func parsePRIVMSG(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+2 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+
+	// Extract message (everything after the second colon)
+	colonIdx := strings.Index(rawMessage, " :")
+	if colonIdx == -1 {
+		return nil
+	}
+	message := rawMessage[colonIdx+2:]
+
+	msg := &ChatMessage{
+		MessageType: "text_message",
+		Channel:     channel,
+		Message:     message,
+		Timestamp:   time.Now(),
+		Tags:        tags,
+		RawMessage:  rawMessage,
+	}
+
+	// Extract common fields from tags
+	if tags != nil {
+		msg.UserID = tags["user-id"]
+		msg.DisplayName = tags["display-name"]
+		msg.Color = tags["color"]
+
+		// Parse badges
+		if badgeStr := tags["badges"]; badgeStr != "" {
+			badges := strings.Split(badgeStr, ",")
+			msg.Badges = badges
+		}
+
+		// Bits amount
+		if bitsStr := tags["bits"]; bitsStr != "" {
+			if bits, err := strconv.Atoi(bitsStr); err == nil {
+				msg.BitsAmount = bits
+			}
+		}
+	}
+
+	// Extract nickname from prefix
+	if commandIdx > 0 && strings.HasPrefix(parts[0], ":") {
+		prefix := parts[0][1:]
+		if bangIdx := strings.Index(prefix, "!"); bangIdx > 0 {
+			msg.Nickname = prefix[:bangIdx]
+		}
+	}
+
+	return msg
+}
+
+// parseCLEARCHAT parses ban and timeout messages
+func parseCLEARCHAT(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+1 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+
+	msg := &ChatMessage{
+		MessageType: "ban",
+		Channel:     channel,
+		Timestamp:   time.Now(),
+		Tags:        tags,
+		RawMessage:  rawMessage,
+	}
+
+	// Check if there's a username (ban/timeout) or if it's a full chat clear
+	if commandIdx+2 < len(parts) {
+		// Extract target user (everything after the second colon or just the next part)
+		if strings.Contains(rawMessage, " :") {
+			colonIdx := strings.Index(rawMessage, " :")
+			msg.TargetUser = strings.TrimSpace(rawMessage[colonIdx+2:])
+		} else if commandIdx+2 < len(parts) {
+			msg.TargetUser = parts[commandIdx+2]
+		}
+	}
+
+	// Extract ban duration from tags (0 = permanent ban)
+	if tags != nil {
+		if durationStr := tags["ban-duration"]; durationStr != "" {
+			if duration, err := strconv.Atoi(durationStr); err == nil {
+				msg.BanDuration = duration
+				if duration > 0 {
+					msg.MessageType = "timeout"
+				}
+			}
+		}
+		msg.BanReason = tags["ban-reason"]
+	}
+
+	return msg
+}
+
+// parseCLEARMSG parses individual message deletion
+func parseCLEARMSG(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+1 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+
+	// Extract the deleted message text
+	var message string
+	if strings.Contains(rawMessage, " :") {
+		colonIdx := strings.Index(rawMessage, " :")
+		message = rawMessage[colonIdx+2:]
+	}
+
+	msg := &ChatMessage{
+		MessageType: "delete_message",
+		Channel:     channel,
+		Message:     message,
+		Timestamp:   time.Now(),
+		Tags:        tags,
+		RawMessage:  rawMessage,
+	}
+
+	if tags != nil {
+		msg.TargetMessageID = tags["target-msg-id"]
+		msg.Nickname = tags["login"]
+	}
+
+	return msg
+}
+
+// parseUSERNOTICE parses subscription, resub, subgift, raid, and ritual messages
+func parseUSERNOTICE(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+1 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+
+	// Extract user message if present
+	var userMessage string
+	if strings.Contains(rawMessage, " :") {
+		colonIdx := strings.Index(rawMessage, " :")
+		userMessage = rawMessage[colonIdx+2:]
+	}
+
+	msg := &ChatMessage{
+		MessageType: "subscription", // Default, will be refined based on msg-id
+		Channel:     channel,
+		Message:     userMessage,
+		Timestamp:   time.Now(),
+		Tags:        tags,
+		RawMessage:  rawMessage,
+	}
+
+	if tags != nil {
+		msg.UserID = tags["user-id"]
+		msg.DisplayName = tags["display-name"]
+		msg.SystemMessage = tags["system-msg"]
+
+		// Determine specific type based on msg-id
+		msgID := tags["msg-id"]
+		switch msgID {
+		case "sub", "resub":
+			msg.MessageType = "subscription"
+			msg.SubPlan = tags["msg-param-sub-plan"]
+			msg.SubPlanName = tags["msg-param-sub-plan-name"]
+			if months := tags["msg-param-cumulative-months"]; months != "" {
+				msg.CumulativeMonths, _ = strconv.Atoi(months)
+			}
+			if months := tags["msg-param-months"]; months != "" {
+				msg.Months, _ = strconv.Atoi(months)
+			}
+			if streak := tags["msg-param-streak-months"]; streak != "" {
+				msg.StreakMonths, _ = strconv.Atoi(streak)
+			}
+
+		case "subgift", "anonsubgift":
+			msg.MessageType = "subscription_gift"
+			msg.IsGift = true
+			msg.SubPlan = tags["msg-param-sub-plan"]
+			msg.SubPlanName = tags["msg-param-sub-plan-name"]
+			msg.TargetUser = tags["msg-param-recipient-user-name"]
+			msg.GifterName = tags["login"]
+			msg.GifterID = tags["user-id"]
+			if months := tags["msg-param-gift-months"]; months != "" {
+				msg.Months, _ = strconv.Atoi(months)
+			}
+
+		case "submysterygift", "anonsubmysterygift":
+			msg.MessageType = "mystery_subscription_gift"
+			msg.IsGift = true
+			msg.SubPlan = tags["msg-param-sub-plan"]
+			msg.GifterName = tags["login"]
+			msg.GifterID = tags["user-id"]
+
+		case "raid":
+			msg.MessageType = "raid"
+			msg.RaiderName = tags["msg-param-login"]
+			if viewers := tags["msg-param-viewerCount"]; viewers != "" {
+				msg.ViewerCount, _ = strconv.Atoi(viewers)
+			}
+
+		case "ritual":
+			msg.MessageType = "other"
+			msg.SystemMessage = tags["system-msg"]
+
+		case "bitsbadgetier":
+			msg.MessageType = "bits_badge_tier"
+			if threshold := tags["msg-param-threshold"]; threshold != "" {
+				msg.BitsAmount, _ = strconv.Atoi(threshold)
+			}
+
+		default:
+			msg.MessageType = "user_notice"
+			msg.NoticeMessageID = msgID
+		}
+	}
+
+	// Extract nickname from login tag or prefix
+	if tags != nil && tags["login"] != "" {
+		msg.Nickname = tags["login"]
+	} else if commandIdx > 0 && strings.HasPrefix(parts[0], ":") {
+		prefix := parts[0][1:]
+		if bangIdx := strings.Index(prefix, "!"); bangIdx > 0 {
+			msg.Nickname = prefix[:bangIdx]
+		}
+	}
+
+	return msg
+}
+
+// parseNOTICE parses system notices
+func parseNOTICE(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+1 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+
+	// Extract notice message
+	var message string
+	if strings.Contains(rawMessage, " :") {
+		colonIdx := strings.Index(rawMessage, " :")
+		message = rawMessage[colonIdx+2:]
+	}
+
+	msg := &ChatMessage{
+		MessageType:   "notice",
+		Channel:       channel,
+		Message:       message,
+		SystemMessage: message,
+		Timestamp:     time.Now(),
+		Tags:          tags,
+		RawMessage:    rawMessage,
+	}
+
+	if tags != nil {
+		msg.NoticeMessageID = tags["msg-id"]
+	}
+
+	return msg
+}
+
+// parseHOSTTARGET parses host notifications
+func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, commandIdx int) *ChatMessage {
+	if commandIdx+2 >= len(parts) {
+		return nil
+	}
+
+	channel := parts[commandIdx+1]
+	targetInfo := parts[commandIdx+2]
+
+	// Format: "HOSTTARGET #channel :target_channel viewer_count"
+	// or "HOSTTARGET #channel :- 0" when hosting ends
+
+	var targetUser string
+	var viewerCount int
+
+	if strings.Contains(rawMessage, " :") {
+		colonIdx := strings.Index(rawMessage, " :")
+		trailing := strings.TrimSpace(rawMessage[colonIdx+2:])
+		trailingParts := strings.Fields(trailing)
+
+		if len(trailingParts) > 0 {
+			targetUser = trailingParts[0]
+			if len(trailingParts) > 1 {
+				viewerCount, _ = strconv.Atoi(trailingParts[1])
+			}
+		}
+	} else {
+		targetUser = targetInfo
+	}
+
+	msg := &ChatMessage{
+		MessageType: "host_target",
+		Channel:     channel,
+		TargetUser:  targetUser,
+		ViewerCount: viewerCount,
+		Timestamp:   time.Now(),
+		Tags:        tags,
+		RawMessage:  rawMessage,
+	}
+
+	return msg
+}
+
+// logRawIRCMessage logs raw IRC messages to type-specific files
+func logRawIRCMessage(messageType, rawMessage string) {
+	var logFile string
+
+	switch messageType {
+	case "text_message":
+		logFile = "logs/messages.log"
+	case "subscription", "subscription_gift", "mystery_subscription_gift", "resub":
+		logFile = "logs/subscriptions.log"
+	case "ban", "timeout":
+		logFile = "logs/bans.log"
+	case "delete_message":
+		logFile = "logs/deleted_messages.log"
+	case "raid":
+		logFile = "logs/raids.log"
+	case "bits", "bits_badge_tier":
+		logFile = "logs/bits.log"
+	case "notice", "user_notice":
+		logFile = "logs/notices.log"
+	default:
+		logFile = "logs/other.log"
+	}
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, rawMessage))
+}
+
+// logParsedMessage logs parsed message details to type-specific files
+func logParsedMessage(msg *ChatMessage) {
+	if msg == nil {
+		return
+	}
+
+	var logFile string
+
+	switch msg.MessageType {
+	case "text_message":
+		return // Don't log parsed text messages to reduce file size
+	case "subscription", "subscription_gift", "mystery_subscription_gift", "resub":
+		logFile = "logs/subscriptions_parsed.log"
+	case "ban", "timeout":
+		logFile = "logs/bans_parsed.log"
+	case "delete_message":
+		logFile = "logs/deleted_messages_parsed.log"
+	case "raid":
+		logFile = "logs/raids.log" // Reuse same file
+	case "bits", "bits_badge_tier":
+		logFile = "logs/bits_parsed.log"
+	case "notice", "user_notice":
+		logFile = "logs/notices_parsed.log"
+	default:
+		logFile = "logs/other_parsed.log"
+	}
+
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	timestamp := msg.Timestamp.Format("2006-01-02 15:04:05")
+
+	var details string
+	switch msg.MessageType {
+	case "subscription", "subscription_gift", "mystery_subscription_gift":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s(%s) Plan=%s Months=%d CumulativeMonths=%d IsGift=%v Gifter=%s Target=%s System=%s Message=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.DisplayName,
+			msg.SubPlan, msg.Months, msg.CumulativeMonths, msg.IsGift,
+			msg.GifterName, msg.TargetUser, msg.SystemMessage, msg.Message)
+
+	case "ban", "timeout":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s TargetUser=%s Duration=%ds Reason=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.TargetUser, msg.BanDuration, msg.BanReason)
+
+	case "delete_message":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s MessageID=%s Message=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.TargetMessageID, msg.Message)
+
+	case "raid":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s Raider=%s Viewers=%d System=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.RaiderName, msg.ViewerCount, msg.SystemMessage)
+
+	case "bits", "bits_badge_tier":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s(%s) Bits=%d Message=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.DisplayName, msg.BitsAmount, msg.Message)
+
+	case "notice", "user_notice":
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s NoticeID=%s Message=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.NoticeMessageID, msg.Message)
+
+	default:
+		details = fmt.Sprintf("[%s] Type=%s Channel=%s Raw=%s\n",
+			timestamp, msg.MessageType, msg.Channel, msg.RawMessage)
+	}
+
+	f.WriteString(details)
+}
+
+// parseMessage parses IRC PRIVMSG format into a ChatMessage struct (legacy compatibility)
 func (s *Subscriber) parseMessage(rawMessage string) *ChatMessage {
-	// Regular expression to parse IRC PRIVMSG format
-	// Example: :nickname!nickname@nickname.tmi.twitch.tv PRIVMSG #channel :message
-	re := regexp.MustCompile(`^:([^!]+)![^@]+@[^ ]+ PRIVMSG (#[^ ]+) :(.*)$`)
-	matches := re.FindStringSubmatch(strings.TrimSpace(rawMessage))
+	// Use the new comprehensive IRC parser
+	msg := parseIRCMessage(rawMessage)
 
-	if len(matches) != 4 {
-		return nil // Not a chat message
-	}
+	// Messages are automatically saved to the database via messageChan and dbWorkerBatch
+	// No need to log to files - all data is in the database tables
 
-	return &ChatMessage{
-		Nickname:  matches[1],
-		Channel:   matches[2],
-		Message:   matches[3],
-		Timestamp: time.Now(),
-	}
+	return msg
 }
 
 // logDisconnectionEvent logs disconnection events to a file for debugging
@@ -256,104 +782,6 @@ func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
 
 	// Also print to console for immediate visibility
 	fmt.Printf("[DISCONNECT] %s | Channel: %s | Message: %s\n", eventType, channel, message)
-}
-
-// detectDisconnectionMessage detects PART, NOTICE, or KICK messages from IRC
-func (s *Subscriber) detectDisconnectionMessage(rawMessage string) {
-	trimmed := strings.TrimSpace(rawMessage)
-
-	// IRC messages have format: [:prefix] COMMAND [params...]
-	// We need to check if PART/KICK is the COMMAND (2nd field after optional prefix)
-	parts := strings.Fields(trimmed)
-	if len(parts) < 2 {
-		return
-	}
-
-	// Find the command position (after prefix if present)
-	commandIdx := 0
-	if strings.HasPrefix(parts[0], ":") {
-		commandIdx = 1
-	}
-
-	if commandIdx >= len(parts) {
-		return
-	}
-
-	command := parts[commandIdx]
-
-	// Detect PART messages
-	// Format: :username!username@username.tmi.twitch.tv PART #channel
-	if command == "PART" && commandIdx+1 < len(parts) {
-		channel := parts[commandIdx+1]
-		s.logDisconnectionEvent("PART", channel, trimmed)
-
-		// Remove from connected channels
-		s.channelsMutex.Lock()
-		delete(s.connectedChannels, channel)
-		s.channelsMutex.Unlock()
-		return
-	}
-
-	// Detect KICK messages
-	// Format: :username!username@username.tmi.twitch.tv KICK #channel username :reason
-	if command == "KICK" && commandIdx+2 < len(parts) {
-		channel := parts[commandIdx+1]
-		kickedUser := parts[commandIdx+2]
-
-		// Extract reason if present
-		reason := ""
-		if commandIdx+3 < len(parts) {
-			reasonStart := strings.Index(trimmed, kickedUser) + len(kickedUser)
-			if colonIdx := strings.Index(trimmed[reasonStart:], ":"); colonIdx != -1 {
-				reason = trimmed[reasonStart+colonIdx+1:]
-			}
-		}
-
-		logMsg := fmt.Sprintf("%s | Kicked User: %s | Reason: %s", trimmed, kickedUser, reason)
-
-		// Only log and act if WE are the ones being kicked (check against our nickname)
-		if kickedUser == s.Nickname {
-			s.logDisconnectionEvent("KICK", channel, logMsg)
-
-			// Remove from connected channels
-			s.channelsMutex.Lock()
-			delete(s.connectedChannels, channel)
-			s.channelsMutex.Unlock()
-		}
-		return
-	}
-
-	// Detect NOTICE messages
-	// Format: @msg-id=... :tmi.twitch.tv NOTICE #channel :message
-	if strings.Contains(trimmed, " NOTICE ") {
-		// Extract channel
-		noticeRe := regexp.MustCompile(`NOTICE (#\w+)`)
-		matches := noticeRe.FindStringSubmatch(trimmed)
-		if len(matches) >= 2 {
-			channel := matches[1]
-
-			// Extract the notice message
-			noticeMsg := ""
-			if colonIdx := strings.LastIndex(trimmed, ":"); colonIdx != -1 {
-				noticeMsg = trimmed[colonIdx+1:]
-			}
-
-			logMsg := fmt.Sprintf("%s | Notice: %s", trimmed, noticeMsg)
-			s.logDisconnectionEvent("NOTICE", channel, logMsg)
-
-			// Check if it's a serious notice that indicates disconnection
-			lowerNotice := strings.ToLower(noticeMsg)
-			if strings.Contains(lowerNotice, "suspend") ||
-				strings.Contains(lowerNotice, "banned") ||
-				strings.Contains(lowerNotice, "timeout") {
-				// Remove from connected channels
-				s.channelsMutex.Lock()
-				delete(s.connectedChannels, channel)
-				s.channelsMutex.Unlock()
-			}
-		}
-		return
-	}
 }
 
 // initializeTwitchClient initializes the Twitch API client with credentials
@@ -424,7 +852,42 @@ func (s *Subscriber) saveChatMessageBatch(messages []*ChatMessage) error {
 		return nil
 	}
 
-	return s.DB.SaveChatMessageBatch(messages)
+	// Convert app.ChatMessage to db.ChatMessage
+	dbMessages := make([]*db.ChatMessage, len(messages))
+	for i, msg := range messages {
+		dbMessages[i] = &db.ChatMessage{
+			Nickname:         msg.Nickname,
+			Message:          msg.Message,
+			Channel:          msg.Channel,
+			Timestamp:        msg.Timestamp,
+			MessageType:      msg.MessageType,
+			Tags:             msg.Tags,
+			UserID:           msg.UserID,
+			DisplayName:      msg.DisplayName,
+			Color:            msg.Color,
+			Badges:           msg.Badges,
+			SubPlan:          msg.SubPlan,
+			SubPlanName:      msg.SubPlanName,
+			Months:           msg.Months,
+			CumulativeMonths: msg.CumulativeMonths,
+			StreakMonths:     msg.StreakMonths,
+			IsGift:           msg.IsGift,
+			GifterName:       msg.GifterName,
+			GifterID:         msg.GifterID,
+			BanDuration:      msg.BanDuration,
+			BanReason:        msg.BanReason,
+			TargetUser:       msg.TargetUser,
+			TargetMessageID:  msg.TargetMessageID,
+			RaiderName:       msg.RaiderName,
+			ViewerCount:      msg.ViewerCount,
+			BitsAmount:       msg.BitsAmount,
+			NoticeMessageID:  msg.NoticeMessageID,
+			SystemMessage:    msg.SystemMessage,
+			RawMessage:       msg.RawMessage,
+		}
+	}
+
+	return s.DB.SaveChatMessageBatch(dbMessages)
 }
 
 // dbWorkerBatch processes chat messages in batches for better database performance
@@ -481,8 +944,9 @@ func (s *Subscriber) readChat() error {
 			return s.ctx.Err()
 		default:
 			// Use robust reading method to handle buffer overflows
-			// Increased timeout to 90s to handle message bursts when joining many channels
-			data, err := s.readLineWithTimeoutRobust(90 * time.Second)
+			// REDUCED timeout from 120s to 5s to prevent blocking and message bursts
+			// Long timeouts cause messages to accumulate during JOIN operations
+			data, err := s.readLineWithTimeoutRobust(20 * time.Second)
 			if err != nil {
 				// If we get a buffer error that we can't handle, try to continue
 				if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
@@ -494,27 +958,30 @@ func (s *Subscriber) readChat() error {
 				}
 				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout") {
 					metrics.RecordReadTimeout(s.ID)
+					// Timeout is OK during low activity - just continue
+					continue
 				}
 				return fmt.Errorf("error reading from connection: %v", err)
 			}
 
 			s.NMessages++
 
-			// Detect disconnection messages (PART, NOTICE, KICK)
-			s.detectDisconnectionMessage(data)
-
 			// Parse chat message and send to async processing
 			if chatMsg := s.parseMessage(data); chatMsg != nil {
 				// Record message metric
 				metrics.RecordMessage(s.ID)
 
+				// Try to send to message channel (non-blocking)
 				select {
 				case s.messageChan <- chatMsg:
 					// Message sent successfully
 				default:
+					// Channel full - log periodically
 					if s.NMessages%1000 == 0 {
-						fmt.Println("Message channel full, dropping messages")
+						fmt.Printf("[%s] ⚠️  Message channel full (%d/%d), dropping messages! This causes bursts when buffer clears.\n",
+							s.ID, len(s.messageChan), cap(s.messageChan))
 					}
+					metrics.RecordParseError(s.ID, "channel_full")
 				}
 			}
 
@@ -691,8 +1158,8 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 
 	// Join channels with rate limiting to avoid Twitch IRC limits
 	// Twitch allows ~50 JOIN commands per 15 seconds (conservative estimate)
-	batchSize := 100              // Join 50 channels at a time
-	batchDelay := 5 * time.Second // Wait 15 seconds between batches
+	batchSize := 50                // Join 50 channels at a time
+	batchDelay := 10 * time.Second // Wait 15 seconds between batches
 
 	for i := 0; i < len(channelsToJoin); i += batchSize {
 		end := i + batchSize
@@ -703,14 +1170,26 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 		batchStart := time.Now()
 		successCount := 0
 
-		for _, channel := range channelsToJoin[i:end] {
-			if err := s.joinChannel(channel); err != nil {
-				fmt.Printf("[%s] Error joining channel %s: %v\n", s.ID, channel, err)
+		currentBatch := channelsToJoin[i:end]
+		innerBatchSize := 5
+		for j := 0; j < len(currentBatch); j += innerBatchSize {
+			innerEnd := j + innerBatchSize
+			if innerEnd > len(currentBatch) {
+				innerEnd = len(currentBatch)
+			}
+			batch := currentBatch[j:innerEnd]
+
+			if err := s.joinChannelBatch(batch); err != nil {
+				fmt.Printf("[%s] Error joining batch %v: %v\n", s.ID, batch, err)
 				continue
 			}
-			s.connectedChannels[channel] = true
-			successCount++
-			time.Sleep(10 * time.Millisecond) // Minimal delay between each JOIN
+
+			for _, channel := range batch {
+				s.connectedChannels[channel] = true
+				successCount++
+			}
+			fmt.Println("Joined channels:", batch)
+			time.Sleep(1000 * time.Millisecond) // Minimal delay between batches
 		}
 
 		fmt.Printf("[%s] Joined %d/%d channels in batch %d/%d (%.1fs)\n",

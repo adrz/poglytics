@@ -53,10 +53,53 @@ type Subscriber struct {
 	scanInterval      time.Duration
 }
 
-// ChatMessage represents a single chat message
+// ChatMessage represents a single chat message or IRC event
 type ChatMessage struct {
-	Nickname  string
-	Message   string
-	Channel   string
-	Timestamp time.Time
+	// Basic fields (all message types)
+	Nickname    string
+	Message     string
+	Channel     string
+	Timestamp   time.Time
+	MessageType string // "text_message", "ban", "timeout", "delete_message", "subscription", "notice", etc.
+
+	// IRC Tags (parsed from IRC messages with tags capability)
+	Tags map[string]string
+
+	// User info
+	UserID      string
+	DisplayName string
+	Color       string
+	Badges      []string
+
+	// Subscription-specific fields
+	SubPlan          string // "Prime", "1000", "2000", "3000"
+	SubPlanName      string
+	Months           int
+	CumulativeMonths int
+	StreakMonths     int
+	IsGift           bool
+	GifterName       string
+	GifterID         string
+
+	// Ban/Timeout specific
+	BanDuration int // seconds, 0 for permanent ban
+	BanReason   string
+	TargetUser  string
+
+	// Deleted message specific
+	TargetMessageID string
+
+	// Raid specific
+	RaiderName  string
+	ViewerCount int
+
+	// Bits/Cheer specific
+	BitsAmount int
+
+	// Notice specific
+	NoticeMessageID string // msg-id tag for NOTICE messages
+	SystemMessage   string // system-msg tag for USERNOTICE messages
+
+	// Raw message for debugging
+	RawMessage string
 }

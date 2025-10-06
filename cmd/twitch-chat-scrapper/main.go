@@ -15,9 +15,9 @@ import (
 
 func main() {
 	// Configuration
-	maxChannels := 50000           // Total channels to monitor
-	channelsPerConnection := 10000 // Channels per IRC connection (safe limit for justinfan)
-	metricsPort := 9091            // Port for Prometheus metrics endpoint
+	maxChannels := 20000          // Total channels to monitor
+	channelsPerConnection := 2000 // Channels per IRC connection (safe limit for justinfan)
+	metricsPort := 9091           // Port for Prometheus metrics endpoint
 
 	// Allow override via environment variables
 	if envMax := os.Getenv("MAX_CHANNELS"); envMax != "" {
