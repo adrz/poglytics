@@ -47,18 +47,10 @@ type Subscriber struct {
 	cancel       context.CancelFunc
 
 	// New fields for channel discovery
-	TwitchClient        *twitch.Client
-	channelsMutex       sync.RWMutex
-	connectedChannels   map[string]bool
-	channelLastActivity map[string]time.Time // Track last message time per channel
-	scanInterval        time.Duration
-	healthCheckInterval time.Duration
-
-	// Debug logging
-	rawIRCLogEnabled   bool
-	rawIRCLogFile      string
-	lastMessageTime    time.Time
-	messageStallWarned bool
+	TwitchClient      *twitch.Client
+	channelsMutex     sync.RWMutex
+	connectedChannels map[string]bool
+	scanInterval      time.Duration
 }
 
 // ChatMessage represents a single chat message

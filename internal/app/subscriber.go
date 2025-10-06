@@ -14,6 +14,7 @@ import (
 
 	"twitch-chat-scrapper/internal/config"
 	"twitch-chat-scrapper/internal/db"
+	"twitch-chat-scrapper/internal/metrics"
 	"twitch-chat-scrapper/internal/twitch"
 	"twitch-chat-scrapper/internal/util"
 )
@@ -172,6 +173,7 @@ func (s *Subscriber) connect() error {
 		s.Connection = conn
 		s.Reader = bufio.NewReaderSize(conn, 2*1024*1024) // 2MB buffer instead of default 4KB
 		s.IsConnected = true
+		metrics.UpdateConnectionStatus(s.ID, true)
 		fmt.Println("Connected to Twitch IRC")
 		connected = true
 	}
@@ -203,11 +205,13 @@ func (s *Subscriber) connect() error {
 // joinChannel joins a specific channel
 func (s *Subscriber) joinChannel(channel string) error {
 	if err := s.send(fmt.Sprintf("JOIN %s", channel)); err != nil {
+		metrics.RecordChannelJoin(s.ID, false)
 		return err
 	}
 
 	s.NChannels++
 	s.ListChannels = append(s.ListChannels, channel)
+	metrics.RecordChannelJoin(s.ID, true)
 	return nil
 }
 
@@ -393,6 +397,9 @@ func (s *Subscriber) Shutdown() {
 func (s *Subscriber) reconnect() error {
 	fmt.Println("Attempting to reconnect due to buffer issues...")
 
+	// Record reconnect metric
+	metrics.RecordReconnect(s.ID)
+
 	// Close existing connection
 	if s.Connection != nil {
 		s.Connection.Close()
@@ -400,6 +407,7 @@ func (s *Subscriber) reconnect() error {
 
 	// Reset connection state
 	s.IsConnected = false
+	metrics.UpdateConnectionStatus(s.ID, false)
 	s.Connection = nil
 	s.Reader = nil
 
@@ -473,14 +481,19 @@ func (s *Subscriber) readChat() error {
 			return s.ctx.Err()
 		default:
 			// Use robust reading method to handle buffer overflows
-			data, err := s.readLineWithTimeoutRobust(30 * time.Second)
+			// Increased timeout to 90s to handle message bursts when joining many channels
+			data, err := s.readLineWithTimeoutRobust(90 * time.Second)
 			if err != nil {
 				// If we get a buffer error that we can't handle, try to continue
 				if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-					fmt.Printf("Unrecoverable buffer error in readChat, skipping: %v\n", err)
+					fmt.Printf("[%s] Unrecoverable buffer error in readChat, skipping: %v\n", s.ID, err)
+					metrics.RecordParseError(s.ID, "buffer_error")
 					// Reset reader and continue
 					s.Reader = bufio.NewReaderSize(s.Connection, 4*1024*1024)
 					continue
+				}
+				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout") {
+					metrics.RecordReadTimeout(s.ID)
 				}
 				return fmt.Errorf("error reading from connection: %v", err)
 			}
@@ -492,6 +505,9 @@ func (s *Subscriber) readChat() error {
 
 			// Parse chat message and send to async processing
 			if chatMsg := s.parseMessage(data); chatMsg != nil {
+				// Record message metric
+				metrics.RecordMessage(s.ID)
+
 				select {
 				case s.messageChan <- chatMsg:
 					// Message sent successfully
@@ -504,11 +520,17 @@ func (s *Subscriber) readChat() error {
 
 			// PING PONG
 			if strings.HasPrefix(data, "PING") {
+				pingStart := time.Now()
 				parts := strings.Split(strings.TrimSpace(data), " ")
 				if len(parts) > 1 {
 					pongMsg := fmt.Sprintf("PONG %s", parts[len(parts)-1])
 					if err := s.send(pongMsg); err != nil {
 						fmt.Printf("Error sending PONG: %v\n", err)
+					} else {
+						// Record ping/pong latency
+						latency := time.Since(pingStart).Seconds()
+						metrics.RecordPingPong(s.ID, latency)
+						metrics.RecordIRCMessage(s.ID, "PING")
 					}
 				}
 			}
@@ -617,8 +639,16 @@ func (s *Subscriber) discoverChannels(maxChannels int) ([]string, error) {
 
 		// Add channels from this page
 		for _, stream := range streamsResp.Data {
+			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
+			if stream.ViewerCount < 5 {
+				fmt.Printf("Reached channels with < 5 viewers (current: %d viewers), stopping discovery\n", stream.ViewerCount)
+				return channels, nil
+			}
+
 			channelName := "#" + stream.UserLogin
 			channels = append(channels, channelName)
+
+			fmt.Printf("Added channel: %s (viewers: %d)\n", channelName, stream.ViewerCount)
 
 			if len(channels) >= maxChannels {
 				break

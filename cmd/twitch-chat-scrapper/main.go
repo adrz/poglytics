@@ -2,18 +2,22 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
 	"twitch-chat-scrapper/internal/app"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
 	// Configuration
-	maxChannels := 10000          // Total channels to monitor
-	channelsPerConnection := 1000 // Channels per IRC connection (safe limit for justinfan)
+	maxChannels := 50000           // Total channels to monitor
+	channelsPerConnection := 10000 // Channels per IRC connection (safe limit for justinfan)
+	metricsPort := 9091            // Port for Prometheus metrics endpoint
 
 	// Allow override via environment variables
 	if envMax := os.Getenv("MAX_CHANNELS"); envMax != "" {
@@ -28,12 +32,28 @@ func main() {
 		}
 	}
 
+	if envMetricsPort := os.Getenv("METRICS_PORT"); envMetricsPort != "" {
+		if val, err := strconv.Atoi(envMetricsPort); err == nil {
+			metricsPort = val
+		}
+	}
+
 	fmt.Printf("Starting Twitch chat scraper with connection pooling\n")
 	fmt.Printf("Configuration:\n")
 	fmt.Printf("  - Total channels: %d\n", maxChannels)
 	fmt.Printf("  - Channels per connection: %d\n", channelsPerConnection)
 	fmt.Printf("  - Estimated connections: %d\n", (maxChannels+channelsPerConnection-1)/channelsPerConnection)
+	fmt.Printf("  - Metrics endpoint: http://localhost:%d/metrics\n", metricsPort)
 	fmt.Println()
+
+	// Start Prometheus metrics HTTP server
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		fmt.Printf("Starting Prometheus metrics server on :%d\n", metricsPort)
+		if err := http.ListenAndServe(fmt.Sprintf(":%d", metricsPort), nil); err != nil {
+			fmt.Printf("Error starting metrics server: %v\n", err)
+		}
+	}()
 
 	// Create connection pool
 	pool, err := app.NewConnectionPool(maxChannels, channelsPerConnection)

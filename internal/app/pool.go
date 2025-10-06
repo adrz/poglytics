@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"sync"
 	"time"
 
 	"twitch-chat-scrapper/internal/config"
 	"twitch-chat-scrapper/internal/db"
+	"twitch-chat-scrapper/internal/metrics"
 	"twitch-chat-scrapper/internal/twitch"
 )
 
@@ -125,25 +127,51 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			case msg := <-pool.centralMessageChan:
 				batch = append(batch, msg)
 				if len(batch) >= maxBatchSize {
-					if err := pool.sharedDB.SaveChatMessageBatch(batch); err != nil {
+					startTime := time.Now()
+					err := pool.sharedDB.SaveChatMessageBatch(batch)
+					duration := time.Since(startTime).Seconds()
+
+					if err != nil {
 						fmt.Printf("[DB Writer] Error saving batch: %v\n", err)
+						metrics.RecordDBBatchInsert(duration, len(batch), false)
+					} else {
+						metrics.RecordDBBatchInsert(duration, len(batch), true)
 					}
 					batch = batch[:0] // Clear batch
 				}
 
 			case <-ticker.C:
 				if len(batch) > 0 {
-					if err := pool.sharedDB.SaveChatMessageBatch(batch); err != nil {
+					startTime := time.Now()
+					err := pool.sharedDB.SaveChatMessageBatch(batch)
+					duration := time.Since(startTime).Seconds()
+
+					if err != nil {
 						fmt.Printf("[DB Writer] Error saving batch: %v\n", err)
+						metrics.RecordDBBatchInsert(duration, len(batch), false)
+					} else {
+						metrics.RecordDBBatchInsert(duration, len(batch), true)
 					}
 					batch = batch[:0] // Clear batch
 				}
 
 				// Report if central channel is getting full
 				channelLen := len(pool.centralMessageChan)
-				if channelLen > 50000 {
-					fmt.Printf("[DB Writer] WARNING: Central message channel is %d%% full (%d/100000)\n",
-						channelLen*100/100000, channelLen)
+				channelCap := cap(pool.centralMessageChan)
+				percentFull := (channelLen * 100) / channelCap
+
+				// Update metrics
+				metrics.UpdateMessageBufferMetrics(channelLen, channelCap)
+
+				if percentFull >= 80 {
+					fmt.Printf("[DB Writer] ⚠️  CRITICAL: Message buffer %d%% full (%d/%d) - risk of dropping messages!\n",
+						percentFull, channelLen, channelCap)
+				} else if percentFull >= 50 {
+					fmt.Printf("[DB Writer] WARNING: Message buffer %d%% full (%d/%d)\n",
+						percentFull, channelLen, channelCap)
+				} else if percentFull >= 25 {
+					fmt.Printf("[DB Writer] Message buffer %d%% full (%d/%d)\n",
+						percentFull, channelLen, channelCap)
 				}
 			}
 		}
@@ -173,7 +201,25 @@ func (pool *ConnectionPool) Start() error {
 		return fmt.Errorf("no channels discovered")
 	}
 
-	fmt.Printf("Discovered %d channels, distributing across connections...\n", len(allChannels))
+	fmt.Printf("Discovered %d channels, shuffling for balanced load distribution...\n", len(allChannels))
+
+	// Shuffle channels to distribute high-traffic and low-traffic channels evenly across connections
+	// This prevents Connection 0 from getting all the popular channels
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(allChannels), func(i, j int) {
+		allChannels[i], allChannels[j] = allChannels[j], allChannels[i]
+	})
+
+	fmt.Println("Channels shuffled - load will be distributed evenly across connections")
+
+	// Recalculate channels per connection based on actual discovered channels
+	actualChannelsPerConnection := len(allChannels) / numConnections
+	if actualChannelsPerConnection == 0 {
+		actualChannelsPerConnection = 1
+	}
+
+	fmt.Printf("Distributing %d channels across %d connections (~%d channels each)\n",
+		len(allChannels), numConnections, actualChannelsPerConnection)
 
 	// Create and start each connection with proper spacing
 	connectionDelay := 2 * time.Second // Wait 2 seconds between each connection
@@ -181,9 +227,14 @@ func (pool *ConnectionPool) Start() error {
 	fmt.Printf("Starting connections with %v delay between each...\n", connectionDelay)
 
 	for i := 0; i < numConnections; i++ {
-		// Calculate channel slice for this connection
-		startIdx := i * pool.channelsPerConnection
-		endIdx := startIdx + pool.channelsPerConnection
+		// Calculate channel slice for this connection based on actual channels
+		startIdx := i * actualChannelsPerConnection
+		endIdx := startIdx + actualChannelsPerConnection
+
+		// Last connection gets all remaining channels
+		if i == numConnections-1 {
+			endIdx = len(allChannels)
+		}
 
 		if endIdx > len(allChannels) {
 			endIdx = len(allChannels)
@@ -194,6 +245,9 @@ func (pool *ConnectionPool) Start() error {
 		}
 
 		connectionChannels := allChannels[startIdx:endIdx]
+
+		fmt.Printf("[Connection %d] Assigned channels %d to %d (total: %d channels)\n",
+			i, startIdx, endIdx-1, len(connectionChannels))
 
 		// Create subscriber for this connection
 		subscriber := pool.createSubscriber(i, connectionChannels)
@@ -216,6 +270,9 @@ func (pool *ConnectionPool) Start() error {
 
 	// Start aggregated statistics reporting
 	go pool.reportAggregatedStats()
+
+	// Start periodic channel discovery and redistribution
+	go pool.periodicChannelRediscovery()
 
 	fmt.Printf("Connection pool started with %d active connections\n", len(pool.connections))
 
@@ -270,6 +327,23 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 			// Give the chat reader a moment to start and authenticate
 			time.Sleep(500 * time.Millisecond)
 
+			// Add staggered delay based on connection ID to prevent all connections
+			// from joining channels simultaneously (which causes message burst)
+			staggerDelay := time.Duration(connectionID*30) * time.Second
+			if staggerDelay > 0 {
+				fmt.Printf("[Connection %d] Waiting %v before joining channels (staggered start)...\n",
+					connectionID, staggerDelay)
+
+				// Use select to allow cancellation during wait
+				select {
+				case <-time.After(staggerDelay):
+					// Continue to channel joining
+				case <-pool.ctx.Done():
+					fmt.Printf("[Connection %d] Cancelled during stagger delay\n", connectionID)
+					return
+				}
+			}
+
 			// Join assigned channels
 			fmt.Printf("[Connection %d] Joining %d channels\n", connectionID, len(channels))
 			subscriber.joinNewChannels(channels)
@@ -296,6 +370,12 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 
 // discoverAllChannels fetches all channels from Twitch API
 func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime).Seconds()
+		metrics.ChannelDiscoveryDuration.Observe(duration)
+	}()
+
 	var channels []string
 	cursor := ""
 	pageSize := 100
@@ -314,6 +394,13 @@ func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
 		}
 
 		for _, stream := range streamsResp.Data {
+			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
+			if stream.ViewerCount < 5 {
+				fmt.Printf("[Pool] Reached channels with < 5 viewers (current: %d viewers), stopping discovery\n", stream.ViewerCount)
+				fmt.Printf("[Pool] Final channel count: %d channels (all with 5+ viewers)\n", len(channels))
+				return channels, nil
+			}
+
 			channelName := "#" + stream.UserLogin
 			channels = append(channels, channelName)
 
@@ -331,6 +418,7 @@ func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	metrics.ChannelsDiscovered.Set(float64(len(channels)))
 	return channels, nil
 }
 
@@ -359,6 +447,11 @@ func (pool *ConnectionPool) reportAggregatedStats() {
 				totalMessages += conn.NMessages
 				totalChannels += len(conn.connectedChannels)
 
+				// Update per-connection metrics
+				connID := fmt.Sprintf("conn-%d", i)
+				metrics.JoinedChannelsPerConnection.WithLabelValues(connID).Set(float64(len(conn.connectedChannels)))
+				metrics.UpdateConnectionStatus(connID, conn.IsConnected)
+
 				// Individual connection stats (less frequent)
 				if totalMessages%10 == 0 {
 					fmt.Printf("[Conn %d] Messages: %d | Channels: %d | Connected: %v\n",
@@ -369,10 +462,127 @@ func (pool *ConnectionPool) reportAggregatedStats() {
 			messagesPerSecond := totalMessages - lastTotalMessages
 			lastTotalMessages = totalMessages
 
+			// Update global metrics
+			metrics.MessagesPerSecond.Set(float64(messagesPerSecond))
+			metrics.JoinedChannelsTotal.Set(float64(totalChannels))
+			metrics.ActiveConnections.Set(float64(activeConnections))
+			metrics.ConnectionsTotal.Set(float64(len(pool.connections)))
+
 			fmt.Printf("[POOL STATS] Connections: %d/%d active | Messages/sec: %d | Total channels: %d | Total messages: %d\n",
 				activeConnections, len(pool.connections), messagesPerSecond, totalChannels, totalMessages)
 
 			pool.mu.RUnlock()
+		}
+	}
+}
+
+// periodicChannelRediscovery periodically rediscovers channels and redistributes them across connections
+func (pool *ConnectionPool) periodicChannelRediscovery() {
+	// Wait 10 minutes before first rediscovery to let initial connections stabilize
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	fmt.Println("[Pool] Periodic channel rediscovery enabled (every 10 minutes)")
+
+	for {
+		select {
+		case <-pool.ctx.Done():
+			return
+		case <-ticker.C:
+			fmt.Println("[Pool] Starting periodic channel rediscovery...")
+
+			// Discover current live channels
+			newChannels, err := pool.discoverAllChannels()
+			if err != nil {
+				fmt.Printf("[Pool] Error rediscovering channels: %v\n", err)
+				continue
+			}
+
+			if len(newChannels) == 0 {
+				fmt.Println("[Pool] No channels discovered during periodic scan")
+				continue
+			}
+
+			fmt.Printf("[Pool] Rediscovered %d channels\n", len(newChannels))
+
+			// Shuffle for even distribution
+			rand.Shuffle(len(newChannels), func(i, j int) {
+				newChannels[i], newChannels[j] = newChannels[j], newChannels[i]
+			})
+
+			// Get currently connected channels across all connections
+			pool.mu.RLock()
+			currentChannels := make(map[string]bool)
+			for _, conn := range pool.connections {
+				conn.channelsMutex.RLock()
+				for channel := range conn.connectedChannels {
+					currentChannels[channel] = true
+				}
+				conn.channelsMutex.RUnlock()
+			}
+			numConnections := len(pool.connections)
+			pool.mu.RUnlock()
+
+			// Determine new channels to join and old channels to part
+			newChannelSet := make(map[string]bool)
+			for _, ch := range newChannels {
+				newChannelSet[ch] = true
+			}
+
+			channelsToJoin := []string{}
+			for _, ch := range newChannels {
+				if !currentChannels[ch] {
+					channelsToJoin = append(channelsToJoin, ch)
+				}
+			}
+
+			offlineChannels := 0
+			for ch := range currentChannels {
+				if !newChannelSet[ch] {
+					offlineChannels++
+				}
+			}
+
+			fmt.Printf("[Pool] Channel delta: +%d new channels to join, %d channels currently offline (keeping them)\n",
+				len(channelsToJoin), offlineChannels)
+
+			// Note: We do NOT part from offline channels - they stay joined in case they come back online
+
+			// Distribute new channels across connections
+			if len(channelsToJoin) > 0 {
+				channelsPerConn := len(channelsToJoin) / numConnections
+				if channelsPerConn == 0 {
+					channelsPerConn = 1
+				}
+
+				pool.mu.RLock()
+				for i, conn := range pool.connections {
+					startIdx := i * channelsPerConn
+					endIdx := startIdx + channelsPerConn
+
+					if i == numConnections-1 {
+						// Last connection gets remaining channels
+						endIdx = len(channelsToJoin)
+					}
+
+					if startIdx >= len(channelsToJoin) {
+						break
+					}
+
+					if endIdx > len(channelsToJoin) {
+						endIdx = len(channelsToJoin)
+					}
+
+					connChannels := channelsToJoin[startIdx:endIdx]
+					if len(connChannels) > 0 {
+						fmt.Printf("[%s] Assigning %d new channels\n", conn.ID, len(connChannels))
+						go conn.joinNewChannels(connChannels)
+					}
+				}
+				pool.mu.RUnlock()
+			}
+
+			fmt.Println("[Pool] Channel rediscovery and redistribution complete")
 		}
 	}
 }
