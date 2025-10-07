@@ -6,10 +6,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"twitch-chat-scrapper/internal/db"
+	"twitch-chat-scrapper/internal/metrics"
 )
 
 // GetOAuth obtains an OAuth token for API access
@@ -69,6 +71,22 @@ func (c *Client) GetStreams(pageSize int, cursor string) (*StreamsResponse, erro
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse and record rate limit headers
+	if rateLimitStr := resp.Header.Get("Ratelimit-Limit"); rateLimitStr != "" {
+		if rateLimit, err := strconv.Atoi(rateLimitStr); err == nil {
+			if remainingStr := resp.Header.Get("Ratelimit-Remaining"); remainingStr != "" {
+				if remaining, err := strconv.Atoi(remainingStr); err == nil {
+					if resetStr := resp.Header.Get("Ratelimit-Reset"); resetStr != "" {
+						if reset, err := strconv.ParseInt(resetStr, 10, 64); err == nil {
+							metrics.UpdateTwitchAPIRateLimit(remaining, rateLimit, reset)
+							log.Printf("Twitch API Rate Limit - Remaining: %d/%d, Reset: %d", remaining, rateLimit, reset)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	var streamsResp StreamsResponse
