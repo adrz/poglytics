@@ -66,7 +66,7 @@ The scraper uses a connection pool architecture where multiple IRC connections a
 
    ```bash
    ./scripts/build.sh
-   ./build/twitch-chat-scrapper
+   ./build/poglytics-scraper
    ```
 
 ### Running the Monitoring Stack
@@ -169,7 +169,7 @@ The scraper exposes comprehensive Prometheus metrics:
 
 This creates binaries in the `build/` directory:
 
-- `twitch-chat-scrapper`: Main scraper application
+- `poglytics-scraper`: Main scraper application
 - `analytics`: Data analysis tools
 - `query-db`: Database query utilities
 
@@ -183,7 +183,7 @@ go test ./...
 
 ```
 cmd/
-├── twitch-chat-scrapper/    # Main application entry point
+├── poglytics-scraper/    # Main application entry point
 internal/
 ├── app/                     # Core application logic
 │   ├── connection.go       # IRC connection handling

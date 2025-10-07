@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"twitch-chat-scrapper/internal/config"
-	"twitch-chat-scrapper/internal/db"
-	"twitch-chat-scrapper/internal/metrics"
-	"twitch-chat-scrapper/internal/twitch"
+	"poglytics-scraper/internal/config"
+	"poglytics-scraper/internal/db"
+	"poglytics-scraper/internal/metrics"
+	"poglytics-scraper/internal/twitch"
 )
 
 // ConnectionPool manages multiple IRC connections to distribute channel load
@@ -429,7 +429,6 @@ func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
 
 	for len(channels) < pool.totalChannels {
 		fmt.Printf("Fetching channels - got %d so far...\n", len(channels))
-
 		streamsResp, err := pool.twitchClient.GetStreams(pageSize, cursor)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get streams: %v", err)

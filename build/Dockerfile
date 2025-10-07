@@ -20,7 +20,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -o build/twitch-chat-scrapper ./cmd/twitch-chat-scrapper/
+RUN go build -o build/poglytics-scraper ./cmd/poglytics-scraper/
 
 # Runtime stage
 FROM alpine:latest
@@ -31,7 +31,7 @@ RUN apk --no-cache add ca-certificates sqlite
 WORKDIR /root/
 
 # Copy the binary from builder stage
-COPY --from=builder /app/build/twitch-chat-scrapper .
+COPY --from=builder /app/build/poglytics-scraper .
 
 # Create directory for database
 RUN mkdir -p /root/data
@@ -40,4 +40,4 @@ RUN mkdir -p /root/data
 # EXPOSE 8080
 
 # Run the application
-CMD ["./twitch-chat-scrapper"]
+CMD ["./poglytics-scraper"]

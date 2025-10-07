@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"twitch-chat-scrapper/internal/twitch"
+	"poglytics-scraper/internal/twitch"
 )
 
 // DatabaseInterface defines methods that database implementations must support

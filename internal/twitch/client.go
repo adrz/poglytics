@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"twitch-chat-scrapper/internal/db"
-	"twitch-chat-scrapper/internal/metrics"
+	"poglytics-scraper/internal/db"
+	"poglytics-scraper/internal/metrics"
 )
 
 // GetOAuth obtains an OAuth token for API access
