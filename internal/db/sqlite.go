@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -210,7 +211,7 @@ func (s *SQLiteDB) InitDB() error {
 	for _, indexSQL := range indexes {
 		if _, err := s.db.Exec(indexSQL); err != nil {
 			// Continue even if index creation fails (it might already exist)
-			fmt.Printf("Warning: failed to create index: %v\n", err)
+			slog.Warn("Failed to create index", "error", err)
 		}
 	}
 
