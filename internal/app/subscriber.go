@@ -990,7 +990,7 @@ func (s *Subscriber) readChat() error {
 				default:
 					// Channel full - log periodically
 					if s.NMessages%1000 == 0 {
-						fmt.Printf("[%s] ⚠️  Message channel full (%d/%d), dropping messages! This causes bursts when buffer clears.\n",
+						fmt.Printf("[%s] Message channel full (%d/%d), dropping messages! This causes bursts when buffer clears.\n",
 							s.ID, len(s.messageChan), cap(s.messageChan))
 					}
 					metrics.RecordParseError(s.ID, "channel_full")
