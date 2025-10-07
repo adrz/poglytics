@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# creds
+.env
+
+# Logs
+*.log
+logs/
+
+# Documentation
+*.md
+
+# Scripts
+scripts/
+
+# Monitoring
+monitoring/
+
+# Build artifacts (binaries)
+build/analytics
+build/query-db
+build/twitch-chat-scrapper
+
+# Docker files (not needed in context)
+docker-compose.yml
+DOCKER.md
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
