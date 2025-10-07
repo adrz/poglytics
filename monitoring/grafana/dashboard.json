@@ -714,6 +714,116 @@
         "x": 12,
         "y": 60
       }
+    },
+    {
+      "id": 25,
+      "title": "Twitch API Rate Limit Remaining",
+      "type": "gauge",
+      "targets": [
+        {
+          "expr": "twitch_api_ratelimit_remaining",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "short",
+          "min": 0,
+          "max": 800
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 68
+      }
+    },
+    {
+      "id": 26,
+      "title": "Twitch API Rate Limit Usage",
+      "type": "graph",
+      "targets": [
+        {
+          "expr": "twitch_api_ratelimit_remaining",
+          "legendFormat": "Remaining",
+          "refId": "A"
+        },
+        {
+          "expr": "twitch_api_ratelimit_limit",
+          "legendFormat": "Limit",
+          "refId": "B"
+        }
+      ],
+      "yaxes": [
+        {
+          "format": "short",
+          "label": "Points"
+        }
+      ],
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 68
+      }
+    },
+    {
+      "id": 27,
+      "title": "Twitch API Rate Limit Reset Time",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "twitch_api_ratelimit_reset - time()",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "unit": "s",
+          "decimals": 0
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 68
+      }
     }
   ],
   "time": {

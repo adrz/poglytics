@@ -148,6 +148,22 @@ var (
 		Name: "twitch_scraper_read_timeouts_total",
 		Help: "Total number of read timeouts",
 	}, []string{"connection_id"})
+
+	// Twitch API rate limit metrics
+	TwitchAPIRateLimitRemaining = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "twitch_api_ratelimit_remaining",
+		Help: "Number of points remaining in the Twitch API rate limit bucket",
+	})
+
+	TwitchAPIRateLimitLimit = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "twitch_api_ratelimit_limit",
+		Help: "The rate at which points are added to the Twitch API rate limit bucket",
+	})
+
+	TwitchAPIRateLimitReset = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "twitch_api_ratelimit_reset",
+		Help: "Unix timestamp when the Twitch API rate limit bucket will be reset to full",
+	})
 )
 
 // RecordDBBatchInsert records metrics for a database batch insert operation
@@ -225,4 +241,11 @@ func RecordPingPong(connectionID string, latency float64) {
 // RecordParsedMessage records a successfully parsed message by its type
 func RecordParsedMessage(connectionID, messageType string) {
 	ParsedMessagesByType.WithLabelValues(connectionID, messageType).Inc()
+}
+
+// UpdateTwitchAPIRateLimit updates the Twitch API rate limit metrics
+func UpdateTwitchAPIRateLimit(remaining, limit int, reset int64) {
+	TwitchAPIRateLimitRemaining.Set(float64(remaining))
+	TwitchAPIRateLimitLimit.Set(float64(limit))
+	TwitchAPIRateLimitReset.Set(float64(reset))
 }
