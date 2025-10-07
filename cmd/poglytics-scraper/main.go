@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"twitch-chat-scrapper/internal/app"
+	"poglytics-scraper/internal/app"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )

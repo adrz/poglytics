@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"twitch-chat-scrapper/internal/config"
-	"twitch-chat-scrapper/internal/db"
-	"twitch-chat-scrapper/internal/metrics"
-	"twitch-chat-scrapper/internal/twitch"
-	"twitch-chat-scrapper/internal/util"
+	"poglytics-scraper/internal/config"
+	"poglytics-scraper/internal/db"
+	"poglytics-scraper/internal/metrics"
+	"poglytics-scraper/internal/twitch"
+	"poglytics-scraper/internal/util"
 )
 
 func NewSubscriber() *Subscriber {

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"twitch-chat-scrapper/internal/db"
+	"poglytics-scraper/internal/db"
 )
 
 // Client represents a Twitch API client

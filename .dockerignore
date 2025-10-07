@@ -21,7 +21,7 @@ monitoring/
 # Build artifacts (binaries)
 build/analytics
 build/query-db
-build/twitch-chat-scrapper
+build/poglytics-scraper
 
 # Docker files (not needed in context)
 docker-compose.yml
