@@ -140,7 +140,7 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 
 						// Log slow batch inserts that might indicate burst pressure
 						if duration > 2.0 {
-							fmt.Printf("[DB Writer %s] ⚠️  Slow batch insert: %.2fs for %d messages (possible burst overload)\n",
+							fmt.Printf("[DB Writer %s] Slow batch insert: %.2fs for %d messages (possible burst overload)\n",
 								time.Now().Format("15:04:05"), duration, len(batch))
 						}
 					}
@@ -511,11 +511,11 @@ func (pool *ConnectionPool) reportAggregatedStats() {
 
 			// Detect and log message burst spikes
 			if messagesPerSecond > 3000 {
-				fmt.Printf("🔥 [POOL STATS %s] ⚠️  MESSAGE BURST DETECTED! Messages/sec: %d (threshold: 3000)\n",
+				fmt.Printf("[POOL STATS %s] MESSAGE BURST DETECTED! Messages/sec: %d (threshold: 3000)\n",
 					time.Now().Format("15:04:05"), messagesPerSecond)
-				fmt.Printf("🔥 Possible causes: 1) Channel JOIN backlog, 2) Rediscovery joining channels simultaneously, 3) High traffic event\n")
+				fmt.Printf("Possible causes: 1) Channel JOIN backlog, 2) Rediscovery joining channels simultaneously, 3) High traffic event\n")
 			} else if messagesPerSecond > 1500 {
-				fmt.Printf("⚠️  [POOL STATS %s] High message rate detected: %d msg/sec (watch for buffer overflow)\n",
+				fmt.Printf("[POOL STATS %s] High message rate detected: %d msg/sec (watch for buffer overflow)\n",
 					time.Now().Format("15:04:05"), messagesPerSecond)
 			}
 
@@ -613,7 +613,7 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 					channelsPerConn = 1
 				}
 
-				fmt.Printf("[Pool] ⚠️  Joining %d new channels across %d connections with staggering to prevent message burst\n",
+				fmt.Printf("[Pool] Joining %d new channels across %d connections with staggering to prevent message burst\n",
 					len(channelsToJoin), numConnections)
 
 				pool.mu.RLock()
