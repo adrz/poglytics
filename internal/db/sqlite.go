@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -159,6 +160,27 @@ func (s *SQLiteDB) InitDB() error {
 			message TEXT,
 			raw_message TEXT
 		)`,
+
+		// Stream snapshots table
+		`CREATE TABLE IF NOT EXISTS stream_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			stream_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			user_login TEXT NOT NULL,
+			user_name TEXT NOT NULL,
+			game_id TEXT,
+			game_name TEXT,
+			type TEXT,
+			title TEXT,
+			viewer_count INTEGER DEFAULT 0,
+			started_at DATETIME,
+			language TEXT,
+			thumbnail_url TEXT,
+			tags TEXT,
+			tag_ids TEXT,
+			is_mature INTEGER DEFAULT 0,
+			snapshot_time DATETIME NOT NULL
+		)`,
 	}
 
 	// Create indexes
@@ -171,6 +193,9 @@ func (s *SQLiteDB) InitDB() error {
 		`CREATE INDEX IF NOT EXISTS idx_bans_timestamp ON bans(timestamp)`,
 		`CREATE INDEX IF NOT EXISTS idx_raids_channel ON raids(channel)`,
 		`CREATE INDEX IF NOT EXISTS idx_raids_timestamp ON raids(timestamp)`,
+		`CREATE INDEX IF NOT EXISTS idx_stream_snapshots_user_login ON stream_snapshots(user_login)`,
+		`CREATE INDEX IF NOT EXISTS idx_stream_snapshots_snapshot_time ON stream_snapshots(snapshot_time)`,
+		`CREATE INDEX IF NOT EXISTS idx_stream_snapshots_game_id ON stream_snapshots(game_id)`,
 	}
 
 	// Execute table creation
@@ -645,6 +670,63 @@ func (s *SQLiteDB) SaveOther(messages []*ChatMessage) error {
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert other message: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveStreamSnapshots saves stream snapshots to the stream_snapshots table
+func (s *SQLiteDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
+		(stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
+		viewer_count, started_at, language, thumbnail_url, tags, tag_ids, is_mature, snapshot_time)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, snapshot := range snapshots {
+		// Convert string slices to comma-separated strings
+		tagsStr := strings.Join(snapshot.Tags, ",")
+		tagIDsStr := strings.Join(snapshot.TagIDs, ",")
+
+		isMature := 0
+		if snapshot.IsMature {
+			isMature = 1
+		}
+
+		_, err = stmt.Exec(
+			snapshot.ID,
+			snapshot.UserID,
+			snapshot.UserLogin,
+			snapshot.UserName,
+			snapshot.GameID,
+			snapshot.GameName,
+			snapshot.Type,
+			snapshot.Title,
+			snapshot.ViewerCount,
+			snapshot.StartedAt,
+			snapshot.Language,
+			snapshot.ThumbnailURL,
+			tagsStr,
+			tagIDsStr,
+			isMature,
+			snapshot.SnapshotTime,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert stream snapshot: %w", err)
 		}
 	}
 

@@ -3,6 +3,8 @@ package twitch
 import (
 	"net/http"
 	"time"
+
+	"twitch-chat-scrapper/internal/db"
 )
 
 // Client represents a Twitch API client
@@ -11,6 +13,7 @@ type Client struct {
 	ClientSecret string
 	AccessToken  string
 	HTTPClient   *http.Client
+	DB           db.Database
 }
 
 // TokenResponse represents the OAuth token response from Twitch
@@ -34,6 +37,7 @@ type Stream struct {
 	StartedAt    string   `json:"started_at"`
 	Language     string   `json:"language"`
 	ThumbnailURL string   `json:"thumbnail_url"`
+	Tags         []string `json:"tags"`
 	TagIDs       []string `json:"tag_ids"`
 	IsMature     bool     `json:"is_mature"`
 }
@@ -52,5 +56,16 @@ func NewClient(clientID, clientSecret string) *Client {
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		HTTPClient:   &http.Client{Timeout: 30 * time.Second},
+		DB:           nil, // Database is optional
+	}
+}
+
+// NewClientWithDB creates a new Twitch API client with database support
+func NewClientWithDB(clientID, clientSecret string, database db.Database) *Client {
+	return &Client{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		HTTPClient:   &http.Client{Timeout: 30 * time.Second},
+		DB:           database,
 	}
 }

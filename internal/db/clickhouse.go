@@ -187,6 +187,29 @@ func (c *ClickHouseDB) InitDB() error {
 		ORDER BY (timestamp, channel)
 		PARTITION BY toYYYYMM(timestamp)`,
 
+		// Stream snapshots table
+		`CREATE TABLE IF NOT EXISTS stream_snapshots (
+			id UInt64,
+			stream_id String,
+			user_id String,
+			user_login String,
+			user_name String,
+			game_id String,
+			game_name String,
+			type String,
+			title String,
+			viewer_count UInt32,
+			started_at DateTime,
+			language String,
+			thumbnail_url String,
+			tags Array(String),
+			tag_ids Array(String),
+			is_mature UInt8,
+			snapshot_time DateTime
+		) ENGINE = MergeTree()
+		ORDER BY (snapshot_time, user_login)
+		PARTITION BY toYYYYMM(snapshot_time)`,
+
 		// Keep legacy table for backward compatibility
 		`CREATE TABLE IF NOT EXISTS chat_messages (
 			id UInt64,
@@ -674,6 +697,60 @@ func (c *ClickHouseDB) SaveOther(messages []*ChatMessage) error {
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert other message: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveStreamSnapshots saves stream snapshots to the stream_snapshots table
+func (c *ClickHouseDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
+		(id, stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
+		viewer_count, started_at, language, thumbnail_url, tags, tag_ids, is_mature, snapshot_time)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for i, snapshot := range snapshots {
+		isMature := uint8(0)
+		if snapshot.IsMature {
+			isMature = 1
+		}
+
+		_, err = stmt.Exec(
+			generateID(snapshot.SnapshotTime, i),
+			snapshot.ID,
+			snapshot.UserID,
+			snapshot.UserLogin,
+			snapshot.UserName,
+			snapshot.GameID,
+			snapshot.GameName,
+			snapshot.Type,
+			snapshot.Title,
+			snapshot.ViewerCount,
+			snapshot.StartedAt,
+			snapshot.Language,
+			snapshot.ThumbnailURL,
+			snapshot.Tags,    // ClickHouse supports array types directly
+			snapshot.TagIDs,  // ClickHouse supports array types directly
+			isMature,
+			snapshot.SnapshotTime,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert stream snapshot: %w", err)
 		}
 	}
 

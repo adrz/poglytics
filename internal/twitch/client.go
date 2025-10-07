@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"twitch-chat-scrapper/internal/db"
 )
 
 // GetOAuth obtains an OAuth token for API access
@@ -70,6 +74,40 @@ func (c *Client) GetStreams(pageSize int, cursor string) (*StreamsResponse, erro
 	var streamsResp StreamsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&streamsResp); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// Save streams to database if database is available
+	if c.DB != nil && len(streamsResp.Data) > 0 {
+		snapshots := make([]*db.StreamSnapshot, len(streamsResp.Data))
+		snapshotTime := time.Now()
+
+		for i, stream := range streamsResp.Data {
+			startedAt, _ := time.Parse(time.RFC3339, stream.StartedAt)
+			snapshots[i] = &db.StreamSnapshot{
+				ID:           stream.ID,
+				UserID:       stream.UserID,
+				UserLogin:    stream.UserLogin,
+				UserName:     stream.UserName,
+				GameID:       stream.GameID,
+				GameName:     stream.GameName,
+				Type:         stream.Type,
+				Title:        stream.Title,
+				ViewerCount:  stream.ViewerCount,
+				StartedAt:    startedAt,
+				Language:     stream.Language,
+				ThumbnailURL: stream.ThumbnailURL,
+				Tags:         stream.Tags,
+				TagIDs:       stream.TagIDs,
+				IsMature:     stream.IsMature,
+				SnapshotTime: snapshotTime,
+			}
+		}
+
+		if err := c.DB.SaveStreamSnapshots(snapshots); err != nil {
+			log.Printf("Warning: failed to save stream snapshots to database: %v", err)
+		} else {
+			log.Printf("Saved %d stream snapshots to database", len(snapshots))
+		}
 	}
 
 	return &streamsResp, nil

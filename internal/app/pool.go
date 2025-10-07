@@ -71,7 +71,8 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		return nil, fmt.Errorf("CLIENT_ID and CLIENT_SECRET must be set")
 	}
 
-	twitchClient := twitch.NewClient(clientID, clientSecret)
+	// Initialize Twitch API client with database support (shared across all connections)
+	twitchClient := twitch.NewClientWithDB(clientID, clientSecret, database)
 	if err := twitchClient.GetOAuth(); err != nil {
 		return nil, fmt.Errorf("failed to get OAuth token: %v", err)
 	}
