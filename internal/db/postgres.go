@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 )
 
@@ -183,6 +184,30 @@ func (p *PostgresDB) InitDB() error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_other_messages_timestamp ON other_messages(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_other_messages_channel ON other_messages(channel);
+
+	-- Stream snapshots table
+	CREATE TABLE IF NOT EXISTS stream_snapshots (
+		id SERIAL PRIMARY KEY,
+		stream_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		user_login TEXT NOT NULL,
+		user_name TEXT NOT NULL,
+		game_id TEXT,
+		game_name TEXT,
+		type TEXT,
+		title TEXT,
+		viewer_count INTEGER DEFAULT 0,
+		started_at TIMESTAMP,
+		language TEXT,
+		thumbnail_url TEXT,
+		tags TEXT[],
+		tag_ids TEXT[],
+		is_mature BOOLEAN DEFAULT FALSE,
+		snapshot_time TIMESTAMP NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_stream_snapshots_user_login ON stream_snapshots(user_login);
+	CREATE INDEX IF NOT EXISTS idx_stream_snapshots_snapshot_time ON stream_snapshots(snapshot_time);
+	CREATE INDEX IF NOT EXISTS idx_stream_snapshots_game_id ON stream_snapshots(game_id);
 
 	-- Legacy table (keep for backward compatibility)
 	CREATE TABLE IF NOT EXISTS chat_messages (
@@ -652,6 +677,54 @@ func (p *PostgresDB) SaveOther(messages []*ChatMessage) error {
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert other message: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveStreamSnapshots saves stream snapshots to the stream_snapshots table
+func (p *PostgresDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	tx, err := p.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
+		(stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
+		viewer_count, started_at, language, thumbnail_url, tags, tag_ids, is_mature, snapshot_time)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, snapshot := range snapshots {
+		_, err = stmt.Exec(
+			snapshot.ID,
+			snapshot.UserID,
+			snapshot.UserLogin,
+			snapshot.UserName,
+			snapshot.GameID,
+			snapshot.GameName,
+			snapshot.Type,
+			snapshot.Title,
+			snapshot.ViewerCount,
+			snapshot.StartedAt,
+			snapshot.Language,
+			snapshot.ThumbnailURL,
+			pq.Array(snapshot.Tags),    // Postgres supports array types directly
+			pq.Array(snapshot.TagIDs),  // Postgres supports array types directly
+			snapshot.IsMature,
+			snapshot.SnapshotTime,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert stream snapshot: %w", err)
 		}
 	}
 

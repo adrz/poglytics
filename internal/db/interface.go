@@ -55,6 +55,26 @@ type ChatMessage struct {
 	RawMessage string
 }
 
+// StreamSnapshot represents a snapshot of a Twitch stream at a point in time
+type StreamSnapshot struct {
+	ID           string
+	UserID       string
+	UserLogin    string
+	UserName     string
+	GameID       string
+	GameName     string
+	Type         string
+	Title        string
+	ViewerCount  int
+	StartedAt    time.Time
+	Language     string
+	ThumbnailURL string
+	Tags         []string
+	TagIDs       []string
+	IsMature     bool
+	SnapshotTime time.Time // When this snapshot was captured
+}
+
 // Database interface defines methods that all database implementations must support
 type Database interface {
 	// InitDB initializes the database connection and creates necessary tables
@@ -74,6 +94,9 @@ type Database interface {
 	SaveNotices(messages []*ChatMessage) error
 	SaveHosts(messages []*ChatMessage) error
 	SaveOther(messages []*ChatMessage) error
+
+	// SaveStreamSnapshots saves multiple stream snapshots in a batch
+	SaveStreamSnapshots(snapshots []*StreamSnapshot) error
 
 	// Close closes the database connection gracefully
 	Close()
