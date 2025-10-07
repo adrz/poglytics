@@ -171,7 +171,7 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 				metrics.UpdateMessageBufferMetrics(channelLen, channelCap)
 
 				if percentFull >= 80 {
-					fmt.Printf("[DB Writer] ⚠️  CRITICAL: Message buffer %d%% full (%d/%d) - risk of dropping messages!\n",
+					fmt.Printf("[DB Writer] CRITICAL: Message buffer %d%% full (%d/%d) - risk of dropping messages!\n",
 						percentFull, channelLen, channelCap)
 				} else if percentFull >= 50 {
 					fmt.Printf("[DB Writer] WARNING: Message buffer %d%% full (%d/%d)\n",
