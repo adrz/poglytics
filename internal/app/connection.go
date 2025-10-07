@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -23,7 +24,7 @@ func (s *Subscriber) readLineWithTimeout(timeout time.Duration) (string, error) 
 	}
 
 	if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-		fmt.Println("Buffer overflow detected, switching to direct connection reading")
+		slog.Warn("Buffer overflow detected, switching to direct connection reading", "id", s.ID)
 		return s.readLineDirectly(timeout)
 	}
 
@@ -104,7 +105,7 @@ func (s *Subscriber) readLineWithTimeoutRobust(timeout time.Duration) (string, e
 
 	// If we get a buffer overflow, try different strategies
 	if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-		fmt.Printf("Buffer overflow detected, trying alternative reading methods: %v\n", err)
+		slog.Warn("Buffer overflow detected, trying alternative reading methods", "id", s.ID, "error", err)
 
 		// Strategy 1: Reset reader with larger buffer
 		s.Reader = bufio.NewReaderSize(s.Connection, 4*1024*1024) // 4MB buffer
@@ -120,7 +121,7 @@ func (s *Subscriber) readLineWithTimeoutRobust(timeout time.Duration) (string, e
 		}
 
 		// Strategy 3: Read directly from connection
-		fmt.Println("Falling back to direct connection reading")
+		slog.Warn("Falling back to direct connection reading", "id", s.ID)
 		return s.readLineDirectly(timeout)
 	}
 

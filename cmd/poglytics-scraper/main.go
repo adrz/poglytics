@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,6 +14,9 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
 	// Configuration
 	maxChannels := 50000          // Total channels to monitor
 	channelsPerConnection := 2000 // Channels per IRC connection (safe limit for justinfan)
@@ -38,27 +41,25 @@ func main() {
 		}
 	}
 
-	fmt.Printf("Starting Twitch chat scraper with connection pooling\n")
-	fmt.Printf("Configuration:\n")
-	fmt.Printf("  - Total channels: %d\n", maxChannels)
-	fmt.Printf("  - Channels per connection: %d\n", channelsPerConnection)
-	fmt.Printf("  - Estimated connections: %d\n", (maxChannels+channelsPerConnection-1)/channelsPerConnection)
-	fmt.Printf("  - Metrics endpoint: http://localhost:%d/metrics\n", metricsPort)
-	fmt.Println()
+	logger.Info("Starting Twitch chat scraper with connection pooling",
+		"total_channels", maxChannels,
+		"channels_per_connection", channelsPerConnection,
+		"estimated_connections", (maxChannels+channelsPerConnection-1)/channelsPerConnection,
+		"metrics_port", metricsPort)
 
 	// Start Prometheus metrics HTTP server
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
-		fmt.Printf("Starting Prometheus metrics server on :%d\n", metricsPort)
-		if err := http.ListenAndServe(fmt.Sprintf(":%d", metricsPort), nil); err != nil {
-			fmt.Printf("Error starting metrics server: %v\n", err)
+		logger.Info("Starting Prometheus metrics server", "port", metricsPort)
+		if err := http.ListenAndServe(":"+strconv.Itoa(metricsPort), nil); err != nil {
+			logger.Error("Error starting metrics server", "error", err)
 		}
 	}()
 
 	// Create connection pool
 	pool, err := app.NewConnectionPool(maxChannels, channelsPerConnection)
 	if err != nil {
-		fmt.Printf("Failed to create connection pool: %v\n", err)
+		logger.Error("Failed to create connection pool", "error", err)
 		os.Exit(1)
 	}
 
@@ -68,14 +69,14 @@ func main() {
 
 	go func() {
 		<-c
-		fmt.Println("\nReceived interrupt signal, shutting down gracefully...")
+		logger.Info("Received interrupt signal, shutting down gracefully...")
 		pool.Shutdown()
 		os.Exit(0)
 	}()
 
 	// Start the connection pool
 	if err := pool.Start(); err != nil {
-		fmt.Printf("Failed to start connection pool: %v\n", err)
+		logger.Error("Failed to start connection pool", "error", err)
 		pool.Shutdown()
 		os.Exit(1)
 	}

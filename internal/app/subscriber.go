@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
@@ -46,7 +46,7 @@ func NewSubscriber() *Subscriber {
 	// Load environment configuration
 	env, err := config.LoadEnv()
 	if err != nil {
-		log.Printf("Warning: Failed to load environment: %v", err)
+		slog.Warn("Failed to load environment", "error", err)
 	}
 
 	// Get database configuration
@@ -67,10 +67,11 @@ func NewSubscriber() *Subscriber {
 	// Initialize database
 	database, err := db.NewDatabase(dbCfg)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		slog.Error("Failed to initialize database", "error", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Database initialized successfully (type: %s)\n", dbCfg.Type)
+	slog.Info("Database initialized successfully", "type", dbCfg.Type)
 
 	subscriber.DB = database
 
@@ -162,7 +163,7 @@ func (s *Subscriber) connect() error {
 	for !connected {
 		conn, err := net.Dial("tcp", s.Server+":"+strconv.Itoa(s.Port))
 		if err != nil {
-			fmt.Printf("Connection failed, retrying in %d second(s)...\n", 1<<exp)
+			slog.Info("Connection failed, retrying", "id", s.ID, "retry_in_seconds", 1<<exp)
 			time.Sleep(time.Duration(1<<exp) * time.Second)
 			exp++
 			continue
@@ -172,7 +173,7 @@ func (s *Subscriber) connect() error {
 		s.Reader = bufio.NewReaderSize(conn, 2*1024*1024) // 2MB buffer instead of default 4KB
 		s.IsConnected = true
 		metrics.UpdateConnectionStatus(s.ID, true)
-		fmt.Println("Connected to Twitch IRC")
+		slog.Info("Connected to Twitch IRC", "id", s.ID)
 		connected = true
 	}
 	// Request IRC capabilities for tags, commands, and membership
@@ -303,7 +304,7 @@ func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
 
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Printf("Error opening log file: %v\n", err)
+		slog.Error("Error opening log file", "error", err)
 		return
 	}
 	defer f.Close()
@@ -313,12 +314,12 @@ func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
 		timestamp, eventType, channel, message)
 
 	if _, err := f.WriteString(logEntry); err != nil {
-		fmt.Printf("Error writing to log file: %v\n", err)
+		slog.Error("Error writing to log file", "error", err)
 		return
 	}
 
 	// Also print to console for immediate visibility
-	fmt.Printf("[DISCONNECT] %s | Channel: %s | Message: %s\n", eventType, channel, message)
+	slog.Info("Disconnection event", "type", eventType, "channel", channel, "message", message)
 }
 
 // initializeTwitchClient initializes the Twitch API client with credentials
@@ -342,13 +343,13 @@ func (s *Subscriber) initializeTwitchClient() error {
 		return fmt.Errorf("failed to get OAuth token: %v", err)
 	}
 
-	fmt.Println("Twitch API authenticated successfully")
+	slog.Info("Twitch API authenticated successfully", "id", s.ID)
 	return nil
 }
 
 // shutdown gracefully shuts down the subscriber
 func (s *Subscriber) Shutdown() {
-	fmt.Println("Shutting down gracefully...")
+	slog.Info("Shutting down gracefully", "id", s.ID)
 	s.cancel()                  // Cancel context to stop all goroutines
 	time.Sleep(2 * time.Second) // Give time for goroutines to finish
 	if s.DB != nil {
@@ -360,7 +361,7 @@ func (s *Subscriber) Shutdown() {
 
 // reconnect handles connection recovery when buffer overflows become unrecoverable
 func (s *Subscriber) reconnect() error {
-	fmt.Println("Attempting to reconnect due to buffer issues...")
+	slog.Info("Attempting to reconnect due to buffer issues", "id", s.ID)
 
 	// Record reconnect metric
 	metrics.RecordReconnect(s.ID)
@@ -449,7 +450,7 @@ func (s *Subscriber) dbWorkerBatch() {
 			if len(batch) >= maxBatchSize {
 				s.dbMutex.Lock()
 				if err := s.saveChatMessageBatch(batch); err != nil {
-					fmt.Printf("Error saving batch to DB: %v\n", err)
+					slog.Error("Error saving batch to DB", "error", err, "id", s.ID)
 				}
 				s.dbMutex.Unlock()
 				batch = batch[:0] // Clear batch
@@ -459,7 +460,7 @@ func (s *Subscriber) dbWorkerBatch() {
 			if len(batch) > 0 {
 				s.dbMutex.Lock()
 				if err := s.saveChatMessageBatch(batch); err != nil {
-					fmt.Printf("Error saving batch to DB: %v\n", err)
+					slog.Error("Error saving batch to DB", "error", err, "id", s.ID)
 				}
 				s.dbMutex.Unlock()
 				batch = batch[:0] // Clear batch
@@ -487,7 +488,7 @@ func (s *Subscriber) readChat() error {
 			if err != nil {
 				// If we get a buffer error that we can't handle, try to continue
 				if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-					fmt.Printf("[%s] Unrecoverable buffer error in readChat, skipping: %v\n", s.ID, err)
+					slog.Error("Unrecoverable buffer error in readChat, skipping", "id", s.ID, "error", err)
 					metrics.RecordParseError(s.ID, "buffer_error")
 					// Reset reader and continue
 					s.Reader = bufio.NewReaderSize(s.Connection, 4*1024*1024)
@@ -520,8 +521,7 @@ func (s *Subscriber) readChat() error {
 				default:
 					// Channel full - log periodically
 					if s.NMessages%1000 == 0 {
-						fmt.Printf("[%s] Message channel full (%d/%d), dropping messages! This causes bursts when buffer clears.\n",
-							s.ID, len(s.messageChan), cap(s.messageChan))
+						slog.Warn("Message channel full, dropping messages", "id", s.ID, "len", len(s.messageChan), "cap", cap(s.messageChan))
 					}
 					metrics.RecordParseError(s.ID, "channel_full")
 				}
@@ -534,7 +534,7 @@ func (s *Subscriber) readChat() error {
 				if len(parts) > 1 {
 					pongMsg := fmt.Sprintf("PONG %s", parts[len(parts)-1])
 					if err := s.send(pongMsg); err != nil {
-						fmt.Printf("Error sending PONG: %v\n", err)
+						slog.Error("Error sending PONG", "id", s.ID, "error", err)
 					} else {
 						// Record ping/pong latency
 						latency := time.Since(pingStart).Seconds()
@@ -555,13 +555,13 @@ func (s *Subscriber) infiniteReadChat() {
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	fmt.Printf("[%s] Chat reader started\n", s.ID)
+	slog.Info("Chat reader started", "id", s.ID)
 
 	for {
 		err := s.readChat()
 		if err != nil {
 			nFailure++
-			fmt.Printf("[%s] Error reading chat: %v\n", s.ID, err)
+			slog.Error("Error reading chat", "id", s.ID, "error", err)
 
 			// Log the disconnection to file
 			s.logDisconnectionEvent("CONNECTION_ERROR", "N/A", fmt.Sprintf("Connection error: %v", err))
@@ -575,17 +575,17 @@ func (s *Subscriber) infiniteReadChat() {
 			// If we have EOF or connection errors, return to let pool handle reconnection
 			// (If ID starts with "conn-", we're in a pool)
 			if isEOF && strings.HasPrefix(s.ID, "conn-") {
-				fmt.Printf("[%s] Connection closed by server (EOF), returning for pool to handle reconnection\n", s.ID)
+				slog.Info("Connection closed by server (EOF), returning for pool to handle reconnection", "id", s.ID)
 				return // Let pool handle reconnection
 			}
 
 			// If we have EOF or connection errors and we're NOT in a pool, reconnect ourselves
 			if isEOF {
-				fmt.Println("Connection closed by server (EOF), attempting to reconnect...")
+				slog.Info("Connection closed by server (EOF), attempting to reconnect", "id", s.ID)
 				if reconnErr := s.reconnect(); reconnErr != nil {
-					fmt.Printf("Reconnection failed: %v\n", reconnErr)
+					slog.Error("Reconnection failed", "id", s.ID, "error", reconnErr)
 				} else {
-					fmt.Println("Reconnected successfully after EOF")
+					slog.Info("Reconnected successfully after EOF", "id", s.ID)
 					nFailure = 0
 					// Need to rejoin all channels
 					s.channelsMutex.Lock()
@@ -599,11 +599,11 @@ func (s *Subscriber) infiniteReadChat() {
 
 			// If we have buffer-related errors and multiple failures, try reconnecting
 			if nFailure > 2 && (strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds")) {
-				fmt.Println("Multiple buffer errors detected, attempting to reconnect...")
+				slog.Warn("Multiple buffer errors detected, attempting to reconnect", "id", s.ID)
 				if reconnErr := s.reconnect(); reconnErr != nil {
-					fmt.Printf("Reconnection failed: %v\n", reconnErr)
+					slog.Error("Reconnection failed", "id", s.ID, "error", reconnErr)
 				} else {
-					fmt.Println("Reconnected successfully")
+					slog.Info("Reconnected successfully", "id", s.ID)
 					nFailure = 0
 					continue
 				}
@@ -611,10 +611,11 @@ func (s *Subscriber) infiniteReadChat() {
 
 			if nFailure > 5 {
 				if strings.HasPrefix(s.ID, "conn-") {
-					fmt.Printf("[%s] Too many failures, returning for pool to handle\n", s.ID)
+					slog.Info("Too many failures, returning for pool to handle", "id", s.ID)
 					return // Let pool handle it
 				}
-				log.Fatalf("Too many failures: %v", err)
+				slog.Error("Too many failures", "error", err)
+				os.Exit(1)
 			}
 
 			time.Sleep(5 * time.Second)
@@ -640,7 +641,7 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 		return
 	}
 
-	fmt.Printf("[%s] Joining %d new channels\n", s.ID, len(channelsToJoin))
+	slog.Info("Joining new channels", "id", s.ID, "count", len(channelsToJoin))
 
 	// Join channels with rate limiting to avoid Twitch IRC limits
 	// Twitch allows ~50 JOIN commands per 15 seconds (conservative estimate)
@@ -666,7 +667,7 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 			batch := currentBatch[j:innerEnd]
 
 			if err := s.joinChannelBatch(batch); err != nil {
-				fmt.Printf("[%s] Error joining batch %v: %v\n", s.ID, batch, err)
+				slog.Error("Error joining batch", "id", s.ID, "batch", batch, "error", err)
 				continue
 			}
 
@@ -677,19 +678,18 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 			time.Sleep(1000 * time.Millisecond) // Minimal delay between batches
 		}
 
-		fmt.Printf("[%s] Joined %d/%d channels in batch %d/%d (%.1fs)\n",
-			s.ID, successCount, end-i, (i/batchSize)+1, (len(channelsToJoin)+batchSize-1)/batchSize, time.Since(batchStart).Seconds())
+		slog.Info("Joined channels in batch", "id", s.ID, "joined", successCount, "total_in_batch", end-i, "batch", (i/batchSize)+1, "total_batches", (len(channelsToJoin)+batchSize-1)/batchSize, "duration", time.Since(batchStart).Seconds())
 
 		// Wait for the rest of the batch period if we finished early
 		if end < len(channelsToJoin) {
 			elapsed := time.Since(batchStart)
 			if elapsed < batchDelay {
 				remaining := batchDelay - elapsed
-				fmt.Printf("[%s] Rate limiting: waiting %.1fs before next batch...\n", s.ID, remaining.Seconds())
+				slog.Info("Rate limiting: waiting before next batch", "id", s.ID, "wait_seconds", remaining.Seconds())
 				time.Sleep(remaining)
 			}
 		}
 	}
 
-	fmt.Printf("[%s] Finished joining all channels\n", s.ID)
+	slog.Info("Finished joining all channels", "id", s.ID)
 }
