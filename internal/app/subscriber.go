@@ -143,7 +143,6 @@ func NewSubscriberWithSharedChannel(database DatabaseInterface, twitchClient *tw
 	}
 
 	// Do NOT start dbWorkerBatch - pool handles DB writes centrally
-
 	return subscriber
 }
 
@@ -209,19 +208,6 @@ func (s *Subscriber) connect() error {
 	return nil
 }
 
-// joinChannel joins a specific channel
-func (s *Subscriber) joinChannel(channel string) error {
-	if err := s.send(fmt.Sprintf("JOIN %s", channel)); err != nil {
-		metrics.RecordChannelJoin(s.ID, false)
-		return err
-	}
-
-	s.NChannels++
-	s.ListChannels = append(s.ListChannels, channel)
-	metrics.RecordChannelJoin(s.ID, true)
-	return nil
-}
-
 // joinChannelBatch joins multiple channels in a single JOIN command
 func (s *Subscriber) joinChannelBatch(channels []string) error {
 	if len(channels) == 0 {
@@ -278,7 +264,7 @@ func parseTags(tagString string) map[string]string {
 }
 
 // parseIRCMessage is the main parser that routes to specific message type parsers
-func parseIRCMessage(rawMessage string) *ChatMessage {
+func (s *Subscriber) parseIRCMessage(rawMessage string) *ChatMessage {
 	trimmed := strings.TrimSpace(rawMessage)
 	if trimmed == "" {
 		return nil
@@ -653,6 +639,7 @@ func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, 
 }
 
 // logRawIRCMessage logs raw IRC messages to type-specific files
+// Unused for debug purposes only
 func logRawIRCMessage(messageType, rawMessage string) {
 	var logFile string
 
@@ -685,87 +672,16 @@ func logRawIRCMessage(messageType, rawMessage string) {
 	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, rawMessage))
 }
 
-// logParsedMessage logs parsed message details to type-specific files
-func logParsedMessage(msg *ChatMessage) {
-	if msg == nil {
-		return
-	}
-
-	var logFile string
-
-	switch msg.MessageType {
-	case "text_message":
-		return // Don't log parsed text messages to reduce file size
-	case "subscription", "subscription_gift", "mystery_subscription_gift", "resub":
-		logFile = "logs/subscriptions_parsed.log"
-	case "ban", "timeout":
-		logFile = "logs/bans_parsed.log"
-	case "delete_message":
-		logFile = "logs/deleted_messages_parsed.log"
-	case "raid":
-		logFile = "logs/raids.log" // Reuse same file
-	case "bits", "bits_badge_tier":
-		logFile = "logs/bits_parsed.log"
-	case "notice", "user_notice":
-		logFile = "logs/notices_parsed.log"
-	default:
-		logFile = "logs/other_parsed.log"
-	}
-
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	timestamp := msg.Timestamp.Format("2006-01-02 15:04:05")
-
-	var details string
-	switch msg.MessageType {
-	case "subscription", "subscription_gift", "mystery_subscription_gift":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s(%s) Plan=%s Months=%d CumulativeMonths=%d IsGift=%v Gifter=%s Target=%s System=%s Message=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.DisplayName,
-			msg.SubPlan, msg.Months, msg.CumulativeMonths, msg.IsGift,
-			msg.GifterName, msg.TargetUser, msg.SystemMessage, msg.Message)
-
-	case "ban", "timeout":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s TargetUser=%s Duration=%ds Reason=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.TargetUser, msg.BanDuration, msg.BanReason)
-
-	case "delete_message":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s MessageID=%s Message=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.TargetMessageID, msg.Message)
-
-	case "raid":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s Raider=%s Viewers=%d System=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.RaiderName, msg.ViewerCount, msg.SystemMessage)
-
-	case "bits", "bits_badge_tier":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s User=%s(%s) Bits=%d Message=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.Nickname, msg.DisplayName, msg.BitsAmount, msg.Message)
-
-	case "notice", "user_notice":
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s NoticeID=%s Message=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.NoticeMessageID, msg.Message)
-
-	default:
-		details = fmt.Sprintf("[%s] Type=%s Channel=%s Raw=%s\n",
-			timestamp, msg.MessageType, msg.Channel, msg.RawMessage)
-	}
-
-	f.WriteString(details)
-}
-
 // parseMessage parses IRC PRIVMSG format into a ChatMessage struct (legacy compatibility)
-func (s *Subscriber) parseMessage(rawMessage string) *ChatMessage {
-	// Use the new comprehensive IRC parser
-	msg := parseIRCMessage(rawMessage)
+// func (s *Subscriber) parseMessage(rawMessage string) *ChatMessage {
+// 	// Use the new comprehensive IRC parser
+// 	msg := parseIRCMessage(rawMessage)
 
-	// Messages are automatically saved to the database via messageChan and dbWorkerBatch
-	// No need to log to files - all data is in the database tables
+// 	// Messages are automatically saved to the database via messageChan and dbWorkerBatch
+// 	// No need to log to files - all data is in the database tables
 
-	return msg
-}
+// 	return msg
+// }
 
 // logDisconnectionEvent logs disconnection events to a file for debugging
 func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
@@ -974,7 +890,7 @@ func (s *Subscriber) readChat() error {
 			s.NMessages++
 
 			// Parse chat message and send to async processing
-			if chatMsg := s.parseMessage(data); chatMsg != nil {
+			if chatMsg := s.parseIRCMessage(data); chatMsg != nil {
 				// Record message metric
 				metrics.RecordMessage(s.ID)
 
@@ -1093,62 +1009,6 @@ func (s *Subscriber) infiniteReadChat() {
 	}
 }
 
-// discoverChannels fetches current live streams and returns channel names
-func (s *Subscriber) discoverChannels(maxChannels int) ([]string, error) {
-	if s.TwitchClient == nil {
-		return nil, fmt.Errorf("twitch client not initialized")
-	}
-
-	var channels []string
-	cursor := ""
-	pageSize := 100
-
-	for len(channels) < maxChannels {
-		fmt.Printf("Discovering channels - fetched %d so far...\n", len(channels))
-
-		streamsResp, err := s.TwitchClient.GetStreams(pageSize, cursor)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get streams: %v", err)
-		}
-
-		if len(streamsResp.Data) == 0 {
-			fmt.Println("No more live streams available")
-			break
-		}
-
-		// Add channels from this page
-		for _, stream := range streamsResp.Data {
-			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
-			if stream.ViewerCount < 5 {
-				fmt.Printf("Reached channels with < 5 viewers (current: %d viewers), stopping discovery\n", stream.ViewerCount)
-				return channels, nil
-			}
-
-			channelName := "#" + stream.UserLogin
-			channels = append(channels, channelName)
-
-			fmt.Printf("Added channel: %s (viewers: %d)\n", channelName, stream.ViewerCount)
-
-			if len(channels) >= maxChannels {
-				break
-			}
-		}
-
-		// Check if there's a next page
-		if streamsResp.Pagination.Cursor == "" {
-			fmt.Println("Reached end of available streams")
-			break
-		}
-
-		cursor = streamsResp.Pagination.Cursor
-
-		// Add a small delay to be respectful to the API
-		time.Sleep(1 * time.Millisecond)
-	}
-
-	return channels, nil
-}
-
 // joinNewChannels joins channels that are not currently connected
 func (s *Subscriber) joinNewChannels(newChannels []string) {
 	s.channelsMutex.Lock()
@@ -1218,135 +1078,4 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 	}
 
 	fmt.Printf("[%s] Finished joining all channels\n", s.ID)
-}
-
-// periodicChannelDiscovery runs in the background to discover and join new channels
-func (s *Subscriber) periodicChannelDiscovery(maxChannels int) {
-	ticker := time.NewTicker(s.scanInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			channels, err := s.discoverChannels(maxChannels)
-			if err != nil {
-				fmt.Printf("Error discovering channels: %v\n", err)
-				continue
-			}
-
-			// Only join new channels if we're connected
-			if s.IsConnected {
-				s.joinNewChannels(channels)
-			} else {
-				// Store channels for when we connect
-				s.channelsMutex.Lock()
-				s.Channels = channels
-				s.channelsMutex.Unlock()
-			}
-		}
-	}
-}
-
-// startStatisticsReporting starts a goroutine that reports statistics every second
-func (s *Subscriber) startStatisticsReporting() {
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-
-		lastMessageCount := 0
-
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-ticker.C:
-				currentMessages := s.NMessages
-				messagesPerSecond := currentMessages - lastMessageCount
-				lastMessageCount = currentMessages
-
-				connectedCount := len(s.connectedChannels)
-
-				fmt.Printf("[STATS] Messages/sec: %d | Connected channels: %d | Total messages: %d\n",
-					messagesPerSecond, connectedCount, currentMessages)
-			}
-		}
-	}()
-}
-
-// Run is the main execution loop for the subscriber with dynamic channel discovery
-func (s *Subscriber) Run(maxChannels int) {
-	defer s.cancel() // Cancel context when run exits
-	defer func() {
-		if s.DB != nil {
-			// Wait a bit for any pending database operations
-			time.Sleep(100 * time.Millisecond)
-			s.DB.Close()
-		}
-	}()
-
-	// Initialize Twitch client for API access
-	if err := s.initializeTwitchClient(); err != nil {
-		log.Fatalf("Failed to initialize Twitch client: %v", err)
-	}
-
-	// Start statistics reporting
-	s.startStatisticsReporting()
-
-	// Start periodic channel discovery in background
-	go s.periodicChannelDiscovery(maxChannels)
-
-	// Initial channel discovery
-	fmt.Println("Performing initial channel discovery...")
-	channels, err := s.discoverChannels(maxChannels)
-	if err != nil {
-		log.Printf("Error in initial channel discovery: %v. Starting with no channels.", err)
-	} else {
-		s.channelsMutex.Lock()
-		s.Channels = channels
-		s.channelsMutex.Unlock()
-		fmt.Printf("Initial discovery found %d channels\n", len(channels))
-	}
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-			// Connect to IRC
-			if err := s.connect(); err != nil {
-				fmt.Printf("Error connecting: %v\n", err)
-				time.Sleep(1 * time.Second)
-				// Generate new nickname for retry
-				s.Nickname = "justinfan" + util.GenerateRandomString(10, "digits")
-				continue
-			}
-
-			// Start reading chat messages in a separate goroutine before joining channels
-			// This allows us to handle connection messages and early chat traffic immediately
-			go s.infiniteReadChat()
-
-			// Give the chat reader a moment to start
-			time.Sleep(100 * time.Millisecond)
-
-			// Join initial channels discovered
-			s.channelsMutex.RLock()
-			initialChannels := make([]string, len(s.Channels))
-			copy(initialChannels, s.Channels)
-			s.channelsMutex.RUnlock()
-
-			if len(initialChannels) > 0 {
-				fmt.Printf("Joining %d initial channels\n", len(initialChannels))
-				s.joinNewChannels(initialChannels)
-			} else {
-				fmt.Println("No initial channels found - waiting for periodic discovery")
-			}
-
-			// Wait for the chat reader goroutine to finish (it runs indefinitely)
-			// This will block here until context is cancelled or an error occurs
-			<-s.ctx.Done()
-			return
-		}
-	}
 }

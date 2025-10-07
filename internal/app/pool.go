@@ -238,7 +238,7 @@ func (pool *ConnectionPool) Start() error {
 
 	// Discover all channels first
 	fmt.Println("Discovering channels...")
-	allChannels, err := pool.discoverAllChannels()
+	allChannels, err := pool.discoverAllChannels(5) // Only get channels with 5+ viewers
 	if err != nil {
 		return fmt.Errorf("failed to discover channels: %v", err)
 	}
@@ -416,7 +416,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 }
 
 // discoverAllChannels fetches all channels from Twitch API
-func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
+func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error) {
 	startTime := time.Now()
 	defer func() {
 		duration := time.Since(startTime).Seconds()
@@ -441,7 +441,7 @@ func (pool *ConnectionPool) discoverAllChannels() ([]string, error) {
 
 		for _, stream := range streamsResp.Data {
 			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
-			if stream.ViewerCount < 5 {
+			if stream.ViewerCount < minViewer {
 				fmt.Printf("[Pool] Reached channels with < 5 viewers (current: %d viewers), stopping discovery\n", stream.ViewerCount)
 				fmt.Printf("[Pool] Final channel count: %d channels (all with 5+ viewers)\n", len(channels))
 				return channels, nil
@@ -548,7 +548,7 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 			fmt.Println("[Pool] Starting periodic channel rediscovery...")
 
 			// Discover current live channels
-			newChannels, err := pool.discoverAllChannels()
+			newChannels, err := pool.discoverAllChannels(5) // Only get channels with 5+ viewers
 			if err != nil {
 				fmt.Printf("[Pool] Error rediscovering channels: %v\n", err)
 				continue
