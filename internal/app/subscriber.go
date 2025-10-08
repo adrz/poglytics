@@ -574,7 +574,7 @@ func (s *Subscriber) infiniteReadChat() {
 
 			// If we have EOF or connection errors, return to let pool handle reconnection
 			// (If ID starts with "conn-", we're in a pool)
-			if isEOF && strings.HasPrefix(s.ID, "conn-") {
+			if isEOF {
 				slog.Info("Connection closed by server (EOF), returning for pool to handle reconnection", "id", s.ID)
 				// Need to clear connected channels so they'll be rejoined after pool reconnects
 				s.channelsMutex.Lock()
@@ -583,43 +583,6 @@ func (s *Subscriber) infiniteReadChat() {
 				}
 				s.channelsMutex.Unlock()
 				return // Let pool handle reconnection
-			}
-
-			// If we have EOF or connection errors and we're NOT in a pool, reconnect ourselves
-			if isEOF {
-				slog.Info("Connection closed by server (EOF), attempting to reconnect", "id", s.ID)
-				if reconnErr := s.reconnect(); reconnErr != nil {
-					slog.Error("Reconnection failed", "id", s.ID, "error", reconnErr)
-				} else {
-					slog.Info("Reconnected successfully after EOF", "id", s.ID)
-					nFailure = 0
-					// Need to rejoin all channels
-					s.channelsMutex.Lock()
-					for channel := range s.connectedChannels {
-						delete(s.connectedChannels, channel)
-					}
-					s.channelsMutex.Unlock()
-					continue
-				}
-			} // If we have buffer-related errors and multiple failures, try reconnecting
-			if nFailure > 2 && (strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds")) {
-				slog.Warn("Multiple buffer errors detected, attempting to reconnect", "id", s.ID)
-				if reconnErr := s.reconnect(); reconnErr != nil {
-					slog.Error("Reconnection failed", "id", s.ID, "error", reconnErr)
-				} else {
-					slog.Info("Reconnected successfully", "id", s.ID)
-					nFailure = 0
-					continue
-				}
-			}
-
-			if nFailure > 5 {
-				if strings.HasPrefix(s.ID, "conn-") {
-					slog.Info("Too many failures, returning for pool to handle", "id", s.ID)
-					return // Let pool handle it
-				}
-				slog.Error("Too many failures", "error", err)
-				os.Exit(1)
 			}
 
 			time.Sleep(5 * time.Second)
