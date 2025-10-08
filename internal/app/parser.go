@@ -8,6 +8,67 @@ import (
 	"time"
 )
 
+func (c *IRCConnection) parseIRCMessage(rawMessage string) *ChatMessage {
+	trimmed := strings.TrimSpace(rawMessage)
+	if trimmed == "" {
+		return nil
+	}
+
+	// Parse IRC message format: [@tags] [:prefix] COMMAND [params] [:trailing]
+	var tags map[string]string
+	remainder := trimmed
+
+	// Extract tags if present
+	if strings.HasPrefix(remainder, "@") {
+		spaceIdx := strings.Index(remainder, " ")
+		if spaceIdx > 0 {
+			tags = parseTags(remainder[0:spaceIdx])
+			remainder = strings.TrimSpace(remainder[spaceIdx+1:])
+		}
+	}
+
+	// Now parse the command
+	parts := strings.Fields(remainder)
+	if len(parts) < 2 {
+		return nil
+	}
+
+	// Find command (skip prefix if present)
+	commandIdx := 0
+	if strings.HasPrefix(parts[0], ":") {
+		commandIdx = 1
+	}
+
+	if commandIdx >= len(parts) {
+		return nil
+	}
+
+	command := parts[commandIdx]
+
+	// Route to appropriate parser based on command
+	switch command {
+	case "PRIVMSG":
+		return parsePRIVMSG(rawMessage, tags, parts, commandIdx)
+	case "CLEARCHAT":
+		return parseCLEARCHAT(rawMessage, tags, parts, commandIdx)
+	case "CLEARMSG":
+		return parseCLEARMSG(rawMessage, tags, parts, commandIdx)
+	case "USERNOTICE":
+		return parseUSERNOTICE(rawMessage, tags, parts, commandIdx)
+	case "NOTICE":
+		return parseNOTICE(rawMessage, tags, parts, commandIdx)
+	case "HOSTTARGET":
+		return parseHOSTTARGET(rawMessage, tags, parts, commandIdx)
+	default:
+		// Log other message types for debugging
+		return &ChatMessage{
+			MessageType: "other",
+			Timestamp:   time.Now(),
+			RawMessage:  rawMessage,
+		}
+	}
+}
+
 // parseTags extracts IRC tags from a message
 // Tags format: @key1=value1;key2=value2;key3=value3
 func parseTags(tagString string) map[string]string {

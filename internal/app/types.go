@@ -26,8 +26,8 @@ type DatabaseInterface interface {
 	GetDB() *sql.DB
 }
 
-// Subscriber represents the main chat scraper instance
-type Subscriber struct {
+// IRCConnection represents an IRC connection to Twitch chat
+type IRCConnection struct {
 	ID           string
 	Server       string
 	Token        string
