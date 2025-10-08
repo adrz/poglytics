@@ -576,6 +576,12 @@ func (s *Subscriber) infiniteReadChat() {
 			// (If ID starts with "conn-", we're in a pool)
 			if isEOF && strings.HasPrefix(s.ID, "conn-") {
 				slog.Info("Connection closed by server (EOF), returning for pool to handle reconnection", "id", s.ID)
+				// Need to clear connected channels so they'll be rejoined after pool reconnects
+				s.channelsMutex.Lock()
+				for channel := range s.connectedChannels {
+					delete(s.connectedChannels, channel)
+				}
+				s.channelsMutex.Unlock()
 				return // Let pool handle reconnection
 			}
 
@@ -595,9 +601,7 @@ func (s *Subscriber) infiniteReadChat() {
 					s.channelsMutex.Unlock()
 					continue
 				}
-			}
-
-			// If we have buffer-related errors and multiple failures, try reconnecting
+			} // If we have buffer-related errors and multiple failures, try reconnecting
 			if nFailure > 2 && (strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds")) {
 				slog.Warn("Multiple buffer errors detected, attempting to reconnect", "id", s.ID)
 				if reconnErr := s.reconnect(); reconnErr != nil {
