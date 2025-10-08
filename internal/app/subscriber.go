@@ -197,33 +197,6 @@ func (s *Subscriber) connect() error {
 	return nil
 }
 
-// joinChannelBatch joins multiple channels in a single JOIN command
-func (s *Subscriber) joinChannelBatch(channels []string) error {
-	if len(channels) == 0 {
-		return nil
-	}
-
-	// Create comma-separated channel list
-	channelList := strings.Join(channels, ",")
-
-	if err := s.send(fmt.Sprintf("JOIN %s", channelList)); err != nil {
-		// Record failure for all channels in batch
-		for range channels {
-			metrics.RecordChannelJoin(s.ID, false)
-		}
-		return err
-	}
-
-	// Record success for all channels
-	for _, channel := range channels {
-		s.NChannels++
-		s.ListChannels = append(s.ListChannels, channel)
-		metrics.RecordChannelJoin(s.ID, true)
-	}
-
-	return nil
-}
-
 // parseIRCMessage is the main parser that routes to specific message type parsers
 func (s *Subscriber) parseIRCMessage(rawMessage string) *ChatMessage {
 	trimmed := strings.TrimSpace(rawMessage)
@@ -310,31 +283,6 @@ func (s *Subscriber) logDisconnectionEvent(eventType, channel, message string) {
 	slog.Info("Disconnection event", "type", eventType, "channel", channel, "message", message)
 }
 
-// initializeTwitchClient initializes the Twitch API client with credentials
-func (s *Subscriber) initializeTwitchClient() error {
-	env, err := config.LoadEnv()
-	if err != nil {
-		return fmt.Errorf("failed to load environment: %v", err)
-	}
-
-	clientID := env["CLIENT_ID"]
-	clientSecret := env["CLIENT_SECRET"]
-
-	if clientID == "" || clientSecret == "" {
-		return fmt.Errorf("CLIENT_ID and CLIENT_SECRET must be set in .env file or environment variables")
-	}
-
-	s.TwitchClient = twitch.NewClient(clientID, clientSecret)
-
-	// Get OAuth token
-	if err := s.TwitchClient.GetOAuth(); err != nil {
-		return fmt.Errorf("failed to get OAuth token: %v", err)
-	}
-
-	slog.Info("Twitch API authenticated successfully", "id", s.ID)
-	return nil
-}
-
 // shutdown gracefully shuts down the subscriber
 func (s *Subscriber) Shutdown() {
 	slog.Info("Shutting down gracefully", "id", s.ID)
@@ -345,31 +293,6 @@ func (s *Subscriber) Shutdown() {
 		time.Sleep(100 * time.Millisecond)
 		s.DB.Close()
 	}
-}
-
-// reconnect handles connection recovery when buffer overflows become unrecoverable
-func (s *Subscriber) reconnect() error {
-	slog.Info("Attempting to reconnect due to buffer issues", "id", s.ID)
-
-	// Record reconnect metric
-	metrics.RecordReconnect(s.ID)
-
-	// Close existing connection
-	if s.Connection != nil {
-		s.Connection.Close()
-	}
-
-	// Reset connection state
-	s.IsConnected = false
-	metrics.UpdateConnectionStatus(s.ID, false)
-	s.Connection = nil
-	s.Reader = nil
-
-	// Generate new nickname to avoid conflicts
-	s.Nickname = "justinfan" + util.GenerateRandomString(10, "digits")
-
-	// Reconnect
-	return s.connect()
 }
 
 // saveChatMessageBatch saves multiple messages using the database interface
@@ -621,7 +544,9 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 			}
 			batch := currentBatch[j:innerEnd]
 
-			if err := s.joinChannelBatch(batch); err != nil {
+			// Join the inner batch of channels
+			// join #channel1, #channel2, ...
+			if err := s.joinChannel(batch); err != nil {
 				slog.Error("Error joining batch", "id", s.ID, "batch", batch, "error", err)
 				continue
 			}
@@ -647,4 +572,31 @@ func (s *Subscriber) joinNewChannels(newChannels []string) {
 	}
 
 	slog.Info("Finished joining all channels", "id", s.ID)
+}
+
+// joinChannelBatch joins multiple channels in a single JOIN command
+func (s *Subscriber) joinChannel(channels []string) error {
+	if len(channels) == 0 {
+		return nil
+	}
+
+	// Create comma-separated channel list
+	channelList := strings.Join(channels, ",")
+
+	if err := s.send(fmt.Sprintf("JOIN %s", channelList)); err != nil {
+		// Record failure for all channels in batch
+		for range channels {
+			metrics.RecordChannelJoin(s.ID, false)
+		}
+		return err
+	}
+
+	// Record success for all channels
+	for _, channel := range channels {
+		s.NChannels++
+		s.ListChannels = append(s.ListChannels, channel)
+		metrics.RecordChannelJoin(s.ID, true)
+	}
+
+	return nil
 }
