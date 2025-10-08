@@ -288,7 +288,7 @@ func (pool *ConnectionPool) Start() error {
 
 		slog.Info("Assigned channels to connection", "connection_id", i, "start", startIdx, "end", endIdx-1, "total", len(connectionChannels))
 
-		// Create conn for this connection
+		// Create IRC connection instance for this pool connection
 		conn := pool.createIRCConnection(i, connectionChannels)
 
 		pool.mu.Lock()
