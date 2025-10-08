@@ -50,3 +50,38 @@ services:
 volumes:
   prometheus_data: {}
   grafana_data: {}
+
+
+
+
+# services:
+#   my-awesome-app:
+#     image: traefik/whoami
+#     container_name: awesome_app_new
+#     networks:
+#       - dokploy-network
+#     labels:
+#       - "traefik.enable=true"
+#       - "traefik.docker.network=dokploy-network"
+
+#       # --- 1. Middleware Definition: For redirecting HTTP to HTTPS ---
+#       # This creates a reusable middleware named 'https-redirect'
+#       - "traefik.http.middlewares.https-redirect.redirectscheme.scheme=https"
+#       - "traefik.http.middlewares.https-redirect.redirectscheme.permanent=true"
+
+#       # --- 2. Insecure Router: For HTTP traffic on port 80 ---
+#       # This router's only job is to catch HTTP traffic and apply the redirect middleware.
+#       - "traefik.http.routers.whoami-http.rule=Host(`whoaminew.adrz.dev`)"
+#       - "traefik.http.routers.whoami-http.entrypoints=web"
+#       - "traefik.http.routers.whoami-http.middlewares=https-redirect@docker"
+
+#       # --- 3. Secure Router: For HTTPS traffic on port 443 ---
+#       # This is your main router that serves the application content.
+#       - "traefik.http.routers.whoami-secure.rule=Host(`whoaminew.adrz.dev`)"
+#       - "traefik.http.routers.whoami-secure.entrypoints=websecure"
+#       - "traefik.http.routers.whoami-secure.tls=true"
+#       # Note: We still don't need 'tls.certresolver' because of your traefik.yml default.
+
+# networks:
+#   dokploy-network:
+#     external: true
