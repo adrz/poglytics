@@ -323,7 +323,7 @@ func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []str
 	conn := NewIRCConnectionWithSharedChannel(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
 	conn.ID = fmt.Sprintf("conn-%d", connectionID)
 
-	// Pre-assign channels to this conn
+	// Pre-assign channels to this IRC connection
 	conn.Channels = channels
 
 	return conn
