@@ -194,18 +194,6 @@ func (s *Subscriber) connect() error {
 		return err
 	}
 
-	// Read authentication response with error handling for large responses
-	// response, err := s.readLineWithTimeout(5 * time.Second)
-	// if err != nil {
-	// 	return err
-	// }
-
-	// fmt.Print("Auth response:", response)
-
-	// if !strings.HasPrefix(response, ":tmi.twitch.tv 001") {
-	// 	return fmt.Errorf("twitch did not accept the username-oauth combination")
-	// }
-
 	return nil
 }
 
