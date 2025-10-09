@@ -16,7 +16,7 @@ import (
 
 // ConnectionPool manages multiple IRC connections to distribute channel load
 type ConnectionPool struct {
-	connections           []*Subscriber
+	connections           []*IRCConnection
 	channelsPerConnection int
 	totalChannels         int
 	sharedDB              DatabaseInterface
@@ -80,7 +80,7 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 	slog.Info("Twitch API authenticated successfully")
 
 	pool := &ConnectionPool{
-		connections:           make([]*Subscriber, 0),
+		connections:           make([]*IRCConnection, 0),
 		channelsPerConnection: channelsPerConnection,
 		totalChannels:         totalChannels,
 		sharedDB:              database,
@@ -288,17 +288,17 @@ func (pool *ConnectionPool) Start() error {
 
 		slog.Info("Assigned channels to connection", "connection_id", i, "start", startIdx, "end", endIdx-1, "total", len(connectionChannels))
 
-		// Create subscriber for this connection
-		subscriber := pool.createSubscriber(i, connectionChannels)
+		// Create IRC connection instance for this pool connection
+		conn := pool.createIRCConnection(i, connectionChannels)
 
 		pool.mu.Lock()
-		pool.connections = append(pool.connections, subscriber)
+		pool.connections = append(pool.connections, conn)
 		pool.mu.Unlock()
 
 		slog.Info("Starting connection", "current", i+1, "total", numConnections)
 
 		// Start this connection in a goroutine
-		go pool.runConnection(i, subscriber, connectionChannels)
+		go pool.runConnection(i, conn, connectionChannels)
 
 		// Wait before starting next connection (except for last one)
 		if i < numConnections-1 {
@@ -318,19 +318,19 @@ func (pool *ConnectionPool) Start() error {
 	return nil
 }
 
-// createSubscriber creates a new subscriber instance for a specific connection
-func (pool *ConnectionPool) createSubscriber(connectionID int, channels []string) *Subscriber {
-	subscriber := NewSubscriberWithSharedChannel(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
-	subscriber.ID = fmt.Sprintf("conn-%d", connectionID)
+// createIRCConnection creates a new conn instance for a specific connection
+func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []string) *IRCConnection {
+	conn := NewIRCConnectionWithSharedChannel(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
+	conn.ID = fmt.Sprintf("conn-%d", connectionID)
 
-	// Pre-assign channels to this subscriber
-	subscriber.Channels = channels
+	// Pre-assign channels to this IRC connection
+	conn.Channels = channels
 
-	return subscriber
+	return conn
 }
 
 // runConnection runs a single connection
-func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscriber, channels []string) {
+func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection, channels []string) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Info("Panic recovered", "connection_id", connectionID, "panic", r)
@@ -346,7 +346,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 			return
 		default:
 			// Connect to IRC
-			if err := subscriber.connect(); err != nil {
+			if err := conn.connect(); err != nil {
 				slog.Error("Connection error, retrying", "connection_id", connectionID, "error", err)
 				time.Sleep(5 * time.Second)
 				continue
@@ -360,7 +360,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 				// infiniteReadChat runs forever and handles its own reconnections
 				// But if it returns, something serious happened
 				slog.Info("Starting chat reader", "connection_id", connectionID)
-				subscriber.infiniteReadChat()
+				conn.infiniteReadChat()
 				chatDone <- fmt.Errorf("infiniteReadChat exited")
 			}()
 
@@ -385,7 +385,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 
 			// Join assigned channels
 			slog.Info("Joining channels", "connection_id", connectionID, "count", len(channels))
-			go subscriber.joinNewChannels(channels)
+			go conn.joinNewChannels(channels)
 			slog.Info("Finished joining channels", "connection_id", connectionID)
 
 			// Wait for either context cancellation or chat reader error
@@ -396,10 +396,10 @@ func (pool *ConnectionPool) runConnection(connectionID int, subscriber *Subscrib
 			case err := <-chatDone:
 				slog.Error("Chat reader exited, reconnecting", "connection_id", connectionID, "error", err)
 				// Close connection and loop to reconnect
-				if subscriber.Connection != nil {
-					subscriber.Connection.Close()
+				if conn.Connection != nil {
+					conn.Connection.Close()
 				}
-				subscriber.IsConnected = false
+				conn.IsConnected = false
 				time.Sleep(2 * time.Second)
 				continue
 			}
