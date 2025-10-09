@@ -134,29 +134,6 @@ func (c *IRCConnection) infiniteReadChat() {
 	}
 }
 
-// readLineWithTimeout reads a line with timeout and better error handling
-func (c *IRCConnection) readLineWithTimeout(timeout time.Duration) (string, error) {
-	if c.Connection == nil {
-		return "", fmt.Errorf("connection is nil")
-	}
-
-	// Set read deadline
-	c.Connection.SetReadDeadline(time.Now().Add(timeout))
-	defer c.Connection.SetReadDeadline(time.Time{}) // Reset deadline
-
-	line, err := c.Reader.ReadBytes('\n')
-	if err == nil {
-		return string(line), nil
-	}
-
-	if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-		slog.Warn("Buffer overflow detected, switching to direct connection reading", "id", c.ID)
-		return c.readLineDirectly(timeout)
-	}
-
-	return "", err
-}
-
 // readLineDirectly reads directly from connection for very long lines
 func (c *IRCConnection) readLineDirectly(timeout time.Duration) (string, error) {
 	c.Connection.SetReadDeadline(time.Now().Add(timeout))

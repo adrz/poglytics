@@ -320,7 +320,7 @@ func (pool *ConnectionPool) Start() error {
 
 // createIRCConnection creates a new conn instance for a specific connection
 func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []string) *IRCConnection {
-	conn := NewIRCConnectionWithSharedChannel(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
+	conn := NewIRCConnection(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
 	conn.ID = fmt.Sprintf("conn-%d", connectionID)
 
 	// Pre-assign channels to this IRC connection

@@ -41,7 +41,6 @@ type IRCConnection struct {
 	Connection   net.Conn
 	Reader       *bufio.Reader
 	DB           DatabaseInterface
-	dbMutex      sync.Mutex
 	messageChan  chan *ChatMessage
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -50,7 +49,6 @@ type IRCConnection struct {
 	TwitchClient      *twitch.Client
 	channelsMutex     sync.RWMutex
 	connectedChannels map[string]bool
-	scanInterval      time.Duration
 }
 
 // ChatMessage represents a single chat message or IRC event
