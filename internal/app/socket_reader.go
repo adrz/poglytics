@@ -134,62 +134,6 @@ func (c *IRCConnection) infiniteReadChat() {
 	}
 }
 
-// readLineDirectly reads directly from connection for very long lines
-func (c *IRCConnection) readLineDirectly(timeout time.Duration) (string, error) {
-	c.Connection.SetReadDeadline(time.Now().Add(timeout))
-	defer c.Connection.SetReadDeadline(time.Time{})
-
-	var result []byte
-	var buffer [1]byte
-
-	for {
-		n, err := c.Connection.Read(buffer[:])
-		if err != nil {
-			return "", err
-		}
-
-		if n > 0 {
-			result = append(result, buffer[0])
-			if buffer[0] == '\n' {
-				break
-			}
-			// Safety check - prevent extremely long lines (10MB limit)
-			if len(result) > 10*1024*1024 {
-				return "", fmt.Errorf("line too long (>10MB), possibly corrupted connection")
-			}
-		}
-	}
-
-	return string(result), nil
-}
-
-// readLineWithScanner reads using Scanner (more robust for very long lines)
-func (c *IRCConnection) readLineWithScanner(timeout time.Duration) (string, error) {
-	if c.Connection == nil {
-		return "", fmt.Errorf("connection is nil")
-	}
-
-	c.Connection.SetReadDeadline(time.Now().Add(timeout))
-	defer c.Connection.SetReadDeadline(time.Time{})
-
-	// Create a new scanner directly on the connection
-	scanner := bufio.NewScanner(c.Connection)
-
-	// Increase the scanner buffer size for very long lines
-	buf := make([]byte, 1024*1024)    // 1MB buffer
-	scanner.Buffer(buf, 10*1024*1024) // Max token size 10MB
-
-	if scanner.Scan() {
-		return scanner.Text() + "\n", nil
-	}
-
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-
-	return "", fmt.Errorf("no line read")
-}
-
 // readLineWithTimeoutRobust reads a line with timeout and handles buffer overflows more gracefully
 func (c *IRCConnection) readLineWithTimeoutRobust(timeout time.Duration) (string, error) {
 	if c.Connection == nil {
@@ -205,29 +149,6 @@ func (c *IRCConnection) readLineWithTimeoutRobust(timeout time.Duration) (string
 	if err == nil {
 		return string(line), nil
 	}
-
-	// If we get a buffer overflow, try different strategies
-	if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-		slog.Warn("Buffer overflow detected, trying alternative reading methods", "id", c.ID, "error", err)
-
-		// Strategy 1: Reset reader with larger buffer
-		c.Reader = bufio.NewReaderSize(c.Connection, 4*1024*1024) // 4MB buffer
-		line, err = c.Reader.ReadBytes('\n')
-		if err == nil {
-			return string(line), nil
-		}
-
-		// Strategy 2: Use scanner with large buffer
-		result, err := c.readLineWithScanner(timeout)
-		if err == nil {
-			return result, nil
-		}
-
-		// Strategy 3: Read directly from connection
-		slog.Warn("Falling back to direct connection reading", "id", c.ID)
-		return c.readLineDirectly(timeout)
-	}
-
 	return "", err
 }
 
