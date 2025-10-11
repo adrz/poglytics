@@ -404,7 +404,8 @@ func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection,
 			}
 		}
 	}
-} // discoverAllChannels fetches all channels from Twitch API
+}
+// discoverAllChannels fetches all channels from Twitch API
 func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error) {
 	startTime := time.Now()
 	defer func() {
