@@ -76,10 +76,6 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		cancel()
 		return nil, fmt.Errorf("failed to get OAuth token: %v", err)
 	}
-	if err := twitchClient.GetOAuth(); err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to get OAuth token: %v", err)
-	}
 
 	slog.Info("Twitch API authenticated successfully")
 
