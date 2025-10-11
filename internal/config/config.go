@@ -23,7 +23,7 @@ func LoadEnv() (map[string]string, error) {
 		loadDBEnvVars(env)
 		return env, nil
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

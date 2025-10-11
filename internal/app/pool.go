@@ -41,6 +41,7 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 	// Initialize shared database (all connections will use the same DB)
 	env, err := config.LoadEnv()
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to load environment: %v", err)
 	}
 
@@ -55,9 +56,9 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		SSLMode:  dbConfig["sslmode"],
 		Path:     dbConfig["path"],
 	}
-
 	database, err := db.NewDatabase(dbCfg)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to initialize database: %v", err)
 	}
 
@@ -66,14 +67,13 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 	// Initialize Twitch API client (shared across all connections)
 	clientID := env["CLIENT_ID"]
 	clientSecret := env["CLIENT_SECRET"]
-
 	if clientID == "" || clientSecret == "" {
+		cancel()
 		return nil, fmt.Errorf("CLIENT_ID and CLIENT_SECRET must be set")
 	}
-
-	// Initialize Twitch API client with database support (shared across all connections)
 	twitchClient := twitch.NewClientWithDB(clientID, clientSecret, database)
 	if err := twitchClient.GetOAuth(); err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to get OAuth token: %v", err)
 	}
 
@@ -246,7 +246,6 @@ func (pool *ConnectionPool) Start() error {
 
 	// Shuffle channels to distribute high-traffic and low-traffic channels evenly across connections
 	// This prevents Connection 0 from getting all the popular channels
-	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(allChannels), func(i, j int) {
 		allChannels[i], allChannels[j] = allChannels[j], allChannels[i]
 	})
@@ -397,7 +396,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection,
 				slog.Error("Chat reader exited, reconnecting", "connection_id", connectionID, "error", err)
 				// Close connection and loop to reconnect
 				if conn.Connection != nil {
-					conn.Connection.Close()
+					_ = conn.Connection.Close() // Explicitly ignore error in reconnection cleanup
 				}
 				conn.IsConnected = false
 				time.Sleep(2 * time.Second)
@@ -406,7 +405,6 @@ func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection,
 		}
 	}
 }
-
 // discoverAllChannels fetches all channels from Twitch API
 func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error) {
 	startTime := time.Now()

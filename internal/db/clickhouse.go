@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
@@ -45,7 +46,7 @@ func (c *ClickHouseDB) InitDB() error {
 
 	// Test the connection
 	if err = db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("failed to ping clickhouse database: %w", err)
 	}
 
@@ -225,7 +226,7 @@ func (c *ClickHouseDB) InitDB() error {
 	for _, createTableSQL := range tables {
 		_, err = c.db.Exec(createTableSQL)
 		if err != nil {
-			c.db.Close()
+			_ = c.db.Close()
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
@@ -345,7 +346,7 @@ func (c *ClickHouseDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO text_messages
 		(id, nickname, display_name, user_id, message, channel, timestamp, badges)
@@ -353,7 +354,7 @@ func (c *ClickHouseDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		badges := joinStrings(msg.Badges, ",")
@@ -386,7 +387,11 @@ func (c *ClickHouseDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil && err != sql.ErrTxDone {
+			slog.Error("Error rolling back transaction", "error", err)
+		}
+	}()
 
 	stmt, err := tx.Prepare(`INSERT INTO subscriptions
 		(id, nickname, display_name, user_id, channel, timestamp, message_type, sub_plan, sub_plan_name,
@@ -396,7 +401,11 @@ func (c *ClickHouseDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			slog.Error("Error closing statement", "error", err)
+		}
+	}()
 
 	for i, msg := range messages {
 		isGift := uint8(0)
@@ -443,7 +452,7 @@ func (c *ClickHouseDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bans
 		(id, channel, timestamp, message_type, target_user, ban_duration, ban_reason, raw_message)
@@ -451,7 +460,7 @@ func (c *ClickHouseDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -482,7 +491,7 @@ func (c *ClickHouseDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO deleted_messages
 		(id, nickname, channel, timestamp, message, target_message_id, raw_message)
@@ -490,7 +499,7 @@ func (c *ClickHouseDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -520,7 +529,7 @@ func (c *ClickHouseDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO raids
 		(id, channel, timestamp, raider_name, viewer_count, system_message, raw_message)
@@ -528,7 +537,7 @@ func (c *ClickHouseDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -558,7 +567,7 @@ func (c *ClickHouseDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bits
 		(id, nickname, display_name, user_id, channel, timestamp, message_type, bits_amount, message, raw_message)
@@ -566,7 +575,7 @@ func (c *ClickHouseDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -599,7 +608,7 @@ func (c *ClickHouseDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO notices
 		(id, channel, timestamp, message_type, notice_message_id, message, system_message, raw_message)
@@ -607,7 +616,7 @@ func (c *ClickHouseDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -638,7 +647,7 @@ func (c *ClickHouseDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO hosts
 		(id, channel, timestamp, target_user, viewer_count, raw_message)
@@ -646,7 +655,7 @@ func (c *ClickHouseDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -675,7 +684,7 @@ func (c *ClickHouseDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO other_messages
 		(id, channel, timestamp, message_type, nickname, message, raw_message)
@@ -683,7 +692,7 @@ func (c *ClickHouseDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, msg := range messages {
 		_, err = stmt.Exec(
@@ -713,7 +722,7 @@ func (c *ClickHouseDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
 		(id, stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
@@ -722,7 +731,7 @@ func (c *ClickHouseDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i, snapshot := range snapshots {
 		isMature := uint8(0)
@@ -744,8 +753,8 @@ func (c *ClickHouseDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 			snapshot.StartedAt,
 			snapshot.Language,
 			snapshot.ThumbnailURL,
-			snapshot.Tags,    // ClickHouse supports array types directly
-			snapshot.TagIDs,  // ClickHouse supports array types directly
+			snapshot.Tags,   // ClickHouse supports array types directly
+			snapshot.TagIDs, // ClickHouse supports array types directly
 			isMature,
 			snapshot.SnapshotTime,
 		)
@@ -762,7 +771,7 @@ func (c *ClickHouseDB) Close() {
 	if c.db != nil {
 		// Wait a bit for any pending database operations
 		time.Sleep(100 * time.Millisecond)
-		c.db.Close()
+		_ = c.db.Close() // Explicitly ignore error in cleanup method
 	}
 }
 
