@@ -7,9 +7,10 @@ import (
 // GenerateRandomString generates a random string of specified length and character type
 func GenerateRandomString(length int, charType string) string {
 	var chars string
-	if charType == "letters" {
+	switch charType {
+	case "letters":
 		chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	} else if charType == "digits" {
+	case "digits":
 		chars = "0123456789"
 	}
 

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 )
 
 // PostgresDB implements the Database interface for PostgreSQL
@@ -40,7 +39,7 @@ func (p *PostgresDB) InitDB() error {
 
 	// Test the connection
 	if err = db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return fmt.Errorf("failed to ping postgres database: %w", err)
 	}
 
@@ -222,7 +221,9 @@ func (p *PostgresDB) InitDB() error {
 
 	_, err = p.db.Exec(createTablesSQL)
 	if err != nil {
-		p.db.Close()
+		if closeErr := p.db.Close(); closeErr != nil {
+			return fmt.Errorf("failed to create tables: %w (also failed to close db: %v)", err, closeErr)
+		}
 		return fmt.Errorf("failed to create tables: %w", err)
 	}
 
@@ -336,7 +337,7 @@ func (p *PostgresDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO text_messages
 		(nickname, display_name, user_id, message, channel, timestamp, color, badges, bits_amount, raw_message)
@@ -344,7 +345,7 @@ func (p *PostgresDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		badges := joinStrings(msg.Badges, ",")
@@ -379,7 +380,7 @@ func (p *PostgresDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO subscriptions
 		(nickname, display_name, user_id, channel, timestamp, message_type, sub_plan, sub_plan_name,
@@ -389,7 +390,7 @@ func (p *PostgresDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -430,7 +431,7 @@ func (p *PostgresDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bans
 		(channel, timestamp, message_type, target_user, ban_duration, ban_reason, raw_message)
@@ -438,7 +439,7 @@ func (p *PostgresDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -468,7 +469,7 @@ func (p *PostgresDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO deleted_messages
 		(nickname, channel, timestamp, message, target_message_id, raw_message)
@@ -476,7 +477,7 @@ func (p *PostgresDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -505,7 +506,7 @@ func (p *PostgresDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO raids
 		(channel, timestamp, raider_name, viewer_count, system_message, raw_message)
@@ -513,7 +514,7 @@ func (p *PostgresDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -542,7 +543,7 @@ func (p *PostgresDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bits
 		(nickname, display_name, user_id, channel, timestamp, message_type, bits_amount, message, raw_message)
@@ -550,7 +551,7 @@ func (p *PostgresDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -582,7 +583,7 @@ func (p *PostgresDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO notices
 		(channel, timestamp, message_type, notice_message_id, message, system_message, raw_message)
@@ -590,7 +591,7 @@ func (p *PostgresDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -620,7 +621,7 @@ func (p *PostgresDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO hosts
 		(channel, timestamp, target_user, viewer_count, raw_message)
@@ -628,7 +629,7 @@ func (p *PostgresDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -656,7 +657,7 @@ func (p *PostgresDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO other_messages
 		(channel, timestamp, message_type, nickname, message, raw_message)
@@ -664,7 +665,7 @@ func (p *PostgresDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -693,7 +694,7 @@ func (p *PostgresDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
 		(stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
@@ -702,7 +703,7 @@ func (p *PostgresDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, snapshot := range snapshots {
 		_, err = stmt.Exec(
@@ -718,8 +719,8 @@ func (p *PostgresDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 			snapshot.StartedAt,
 			snapshot.Language,
 			snapshot.ThumbnailURL,
-			pq.Array(snapshot.Tags),    // Postgres supports array types directly
-			pq.Array(snapshot.TagIDs),  // Postgres supports array types directly
+			pq.Array(snapshot.Tags),   // Postgres supports array types directly
+			pq.Array(snapshot.TagIDs), // Postgres supports array types directly
 			snapshot.IsMature,
 			snapshot.SnapshotTime,
 		)
@@ -736,7 +737,7 @@ func (p *PostgresDB) Close() {
 	if p.db != nil {
 		// Wait a bit for any pending database operations
 		time.Sleep(100 * time.Millisecond)
-		p.db.Close()
+		_ = p.db.Close() // Explicitly ignore error in cleanup method
 	}
 }
 

@@ -50,7 +50,11 @@ func (c *IRCConnection) logDisconnectionEvent(eventType, channel, message string
 		slog.Error("Error opening log file", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Error("Error closing log file", "error", err)
+		}
+	}()
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logEntry := fmt.Sprintf("[%s] %s | Channel: %s | Message: %s\n",

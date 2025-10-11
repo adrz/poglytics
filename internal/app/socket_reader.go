@@ -141,8 +141,8 @@ func (c *IRCConnection) readLineWithTimeoutRobust(timeout time.Duration) (string
 	}
 
 	// Set read deadline
-	c.Connection.SetReadDeadline(time.Now().Add(timeout))
-	defer c.Connection.SetReadDeadline(time.Time{}) // Reset deadline
+	_ = c.Connection.SetReadDeadline(time.Now().Add(timeout))
+	defer func() { _ = c.Connection.SetReadDeadline(time.Time{}) }() // Reset deadline
 
 	// First try with the current reader
 	line, err := c.Reader.ReadBytes('\n')

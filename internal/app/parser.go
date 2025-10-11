@@ -1,8 +1,6 @@
 package app
 
 import (
-	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -412,34 +410,43 @@ func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, 
 
 // logRawIRCMessage logs raw IRC messages to type-specific files
 // Unused for debug purposes only
-func logRawIRCMessage(messageType, rawMessage string) {
-	var logFile string
+// func logRawIRCMessage(messageType, rawMessage string) {
+// 	var logFile string
 
-	switch messageType {
-	case "text_message":
-		logFile = "logs/messages.log"
-	case "subscription", "subscription_gift", "mystery_subscription_gift", "resub":
-		logFile = "logs/subscriptions.log"
-	case "ban", "timeout":
-		logFile = "logs/bans.log"
-	case "delete_message":
-		logFile = "logs/deleted_messages.log"
-	case "raid":
-		logFile = "logs/raids.log"
-	case "bits", "bits_badge_tier":
-		logFile = "logs/bits.log"
-	case "notice", "user_notice":
-		logFile = "logs/notices.log"
-	default:
-		logFile = "logs/other.log"
-	}
+// 	switch messageType {
+// 	case "text_message":
+// 		logFile = "logs/messages.log"
+// 	case "subscription", "subscription_gift", "mystery_subscription_gift", "resub":
+// 		logFile = "logs/subscriptions.log"
+// 	case "ban", "timeout":
+// 		logFile = "logs/bans.log"
+// 	case "delete_message":
+// 		logFile = "logs/deleted_messages.log"
+// 	case "raid":
+// 		logFile = "logs/raids.log"
+// 	case "bits", "bits_badge_tier":
+// 		logFile = "logs/bits.log"
+// 	case "notice", "user_notice":
+// 		logFile = "logs/notices.log"
+// 	default:
+// 		logFile = "logs/other.log"
+// 	}
 
-	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
+// 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+// 	if err != nil {
+// 		return
+// 	}
+// 	defer func() {
+// 		if err := f.Close(); err != nil {
+// 			slog.Error("Error closing log file", "error", err)
+// 		}
+// 	}()
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	f.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, rawMessage))
-}
+// 	timestamp := time.Now().Format("2006-01-02 15:04:05")
+
+// 	_, err = fmt.Fprintf(f, "[%s] %s\n", timestamp, rawMessage)
+// 	if err != nil {
+// 		slog.Error("Error writing to log file", "error", err)
+// 	}
+
+// }
