@@ -19,7 +19,7 @@ func main() {
 
 	// Configuration
 	maxChannels := 50000          // Total channels to monitor
-	channelsPerConnection := 2000 // Channels per IRC connection (safe limit for justinfan)
+	channelsPerConnection := 1500 // Channels per IRC connection (safe limit for justinfan)
 	metricsPort := 9091           // Port for Prometheus metrics endpoint
 
 	// Allow override via environment variables

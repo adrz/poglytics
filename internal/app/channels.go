@@ -30,8 +30,8 @@ func (conn *IRCConnection) joinNewChannels(newChannels []string) {
 
 	// Join channels with rate limiting to avoid Twitch IRC limits
 	// Twitch allows ~50 JOIN commands per 15 seconds (conservative estimate)
-	batchSize := 50                // Join 50 channels at a time
-	batchDelay := 10 * time.Second // Wait 10 seconds between batches
+	batchSize := 50               // Join 50 channels at a time
+	batchDelay := 5 * time.Second // Wait 10 seconds between batches
 
 	for i := 0; i < len(channelsToJoin); i += batchSize {
 		end := i + batchSize
@@ -62,7 +62,7 @@ func (conn *IRCConnection) joinNewChannels(newChannels []string) {
 				conn.connectedChannels[channel] = true
 				successCount++
 			}
-			time.Sleep(1000 * time.Millisecond) // Minimal delay between batches
+			time.Sleep(500 * time.Millisecond) // Minimal delay between batches
 		}
 
 		slog.Info("Joined channels in batch", "id", conn.ID, "joined", successCount, "total_in_batch", end-i, "batch", (i/batchSize)+1, "total_batches", (len(channelsToJoin)+batchSize-1)/batchSize, "duration", time.Since(batchStart).Seconds())

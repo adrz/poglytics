@@ -233,7 +233,7 @@ func (pool *ConnectionPool) Start() error {
 
 	// Discover all channels first
 	slog.Info("Discovering channels")
-	allChannels, err := pool.discoverAllChannels(5) // Only get channels with 5+ viewers
+	allChannels, err := pool.discoverAllChannels(3) // Only get channels with 5+ viewers
 	if err != nil {
 		return fmt.Errorf("failed to discover channels: %v", err)
 	}
@@ -368,7 +368,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection,
 
 			// Add staggered delay based on connection ID to prevent all connections
 			// from joining channels simultaneously (which causes message burst)
-			staggerDelay := time.Duration(connectionID*10) * time.Second
+			staggerDelay := time.Duration(connectionID*1) * time.Second
 			if staggerDelay > 0 {
 				slog.Info("Waiting before joining channels (staggered start)", "connection_id", connectionID, "delay", staggerDelay)
 
@@ -405,6 +405,7 @@ func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection,
 		}
 	}
 }
+
 // discoverAllChannels fetches all channels from Twitch API
 func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error) {
 	startTime := time.Now()
@@ -534,7 +535,7 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 			slog.Info("Starting periodic channel rediscovery")
 
 			// Discover current live channels
-			newChannels, err := pool.discoverAllChannels(5) // Only get channels with 5+ viewers
+			newChannels, err := pool.discoverAllChannels(3) // Only get channels with 5+ viewers
 			if err != nil {
 				slog.Error("Error rediscovering channels", "error", err)
 				continue
