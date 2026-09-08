@@ -28,12 +28,16 @@ type ConnectionPool struct {
 	// Centralized message handling
 	centralMessageChan chan *ChatMessage
 	dbWriterWg         sync.WaitGroup
+	workerWg           sync.WaitGroup
+	shutdownOnce       sync.Once
+	started            bool
+	stopping           bool
 }
 
 // NewConnectionPool creates a new connection pool
 func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPool, error) {
-	if channelsPerConnection <= 0 {
-		channelsPerConnection = 50 // Default safe value
+	if totalChannels <= 0 || channelsPerConnection <= 0 {
+		return nil, fmt.Errorf("channel counts must be positive")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,11 +72,13 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 	clientID := env["CLIENT_ID"]
 	clientSecret := env["CLIENT_SECRET"]
 	if clientID == "" || clientSecret == "" {
+		database.Close()
 		cancel()
 		return nil, fmt.Errorf("CLIENT_ID and CLIENT_SECRET must be set")
 	}
 	twitchClient := twitch.NewClientWithDB(clientID, clientSecret, database)
 	if err := twitchClient.GetOAuth(); err != nil {
+		database.Close()
 		cancel()
 		return nil, fmt.Errorf("failed to get OAuth token: %v", err)
 	}
@@ -99,83 +105,45 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 // startCentralizedDBWriter starts a single DB writer that handles all messages from all connections
 func (pool *ConnectionPool) startCentralizedDBWriter() {
 	pool.dbWriterWg.Add(1)
-
 	go func() {
 		defer pool.dbWriterWg.Done()
-
-		ticker := time.NewTicker(1 * time.Second) // Batch every second
+		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-
-		var batch []*ChatMessage
-		const maxBatchSize = 500 // Larger batch size for better throughput
-
-		messagesDropped := 0
-
+		const maxBatchSize = 500
+		batch := make([]*ChatMessage, 0, maxBatchSize)
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			start := time.Now()
+			err := pool.saveChatMessageBatch(batch)
+			metrics.RecordDBBatchInsert(time.Since(start).Seconds(), len(batch), err == nil)
+			if err != nil {
+				// Backends may already have committed part of the batch. Retrying
+				// it here would duplicate those rows without idempotency support.
+				slog.Error("DB batch could not be fully saved", "messages", len(batch), "error", err)
+			}
+			clear(batch)
+			batch = batch[:0]
+		}
 		for {
 			select {
-			case <-pool.ctx.Done():
-				// Process remaining messages before exiting
-				if len(batch) > 0 {
-					if err := pool.saveChatMessageBatch(batch); err != nil {
-						slog.Error("DB Writer: Error saving final batch", "error", err)
-					}
+			case msg, ok := <-pool.centralMessageChan:
+				if !ok {
+					flush()
+					metrics.UpdateMessageBufferMetrics(0, cap(pool.centralMessageChan))
+					return
 				}
-				if messagesDropped > 0 {
-					slog.Warn("DB Writer: Total messages dropped", "count", messagesDropped)
+				if msg == nil {
+					continue
 				}
-				return
-
-			case msg := <-pool.centralMessageChan:
 				batch = append(batch, msg)
-				if len(batch) >= maxBatchSize {
-					startTime := time.Now()
-					err := pool.saveChatMessageBatch(batch)
-					duration := time.Since(startTime).Seconds()
-
-					if err != nil {
-						slog.Error("DB Writer: Error saving batch", "time", time.Now().Format("15:04:05"), "error", err)
-						metrics.RecordDBBatchInsert(duration, len(batch), false)
-					} else {
-						metrics.RecordDBBatchInsert(duration, len(batch), true)
-
-						// Log slow batch inserts that might indicate burst pressure
-						if duration > 2.0 {
-							slog.Warn("DB Writer: Slow batch insert", "time", time.Now().Format("15:04:05"), "duration", duration, "messages", len(batch))
-						}
-					}
-					batch = batch[:0] // Clear batch
+				if len(batch) == maxBatchSize {
+					flush()
 				}
-
 			case <-ticker.C:
-				if len(batch) > 0 {
-					startTime := time.Now()
-					err := pool.saveChatMessageBatch(batch)
-					duration := time.Since(startTime).Seconds()
-
-					if err != nil {
-						slog.Error("DB Writer: Error saving batch", "error", err)
-						metrics.RecordDBBatchInsert(duration, len(batch), false)
-					} else {
-						metrics.RecordDBBatchInsert(duration, len(batch), true)
-					}
-					batch = batch[:0] // Clear batch
-				}
-
-				// Report if central channel is getting full
-				channelLen := len(pool.centralMessageChan)
-				channelCap := cap(pool.centralMessageChan)
-				percentFull := (channelLen * 100) / channelCap
-
-				// Update metrics
-				metrics.UpdateMessageBufferMetrics(channelLen, channelCap)
-
-				if percentFull >= 80 {
-					slog.Error("DB Writer: CRITICAL: Message buffer full", "percent", percentFull, "len", channelLen, "cap", channelCap)
-				} else if percentFull >= 50 {
-					slog.Warn("DB Writer: WARNING: Message buffer full", "percent", percentFull, "len", channelLen, "cap", channelCap)
-				} else if percentFull >= 25 {
-					slog.Info("DB Writer: Message buffer full", "percent", percentFull, "len", channelLen, "cap", channelCap)
-				}
+				flush()
+				metrics.UpdateMessageBufferMetrics(len(pool.centralMessageChan), cap(pool.centralMessageChan))
 			}
 		}
 	}()
@@ -214,6 +182,7 @@ func (pool *ConnectionPool) saveChatMessageBatch(messages []*ChatMessage) error 
 			NoticeMessageID:  msg.NoticeMessageID,
 			SystemMessage:    msg.SystemMessage,
 			RawMessage:       msg.RawMessage,
+			Tags:             msg.Tags,
 		}
 	}
 
@@ -222,8 +191,18 @@ func (pool *ConnectionPool) saveChatMessageBatch(messages []*ChatMessage) error 
 
 // Start initializes and starts all connections in the pool
 func (pool *ConnectionPool) Start() error {
+	pool.mu.Lock()
+	if pool.started || pool.stopping {
+		pool.mu.Unlock()
+		return fmt.Errorf("connection pool already started or stopped")
+	}
+	pool.started = true
+	// Track startup too: shutdown must wait for discovery and worker creation.
+	pool.workerWg.Add(1)
+	pool.mu.Unlock()
+	defer pool.workerWg.Done()
 	// Calculate number of connections needed
-	numConnections := (pool.totalChannels + pool.channelsPerConnection - 1) / pool.channelsPerConnection
+	numConnections := 1 + (pool.totalChannels-1)/pool.channelsPerConnection
 
 	if numConnections == 0 {
 		numConnections = 1
@@ -253,7 +232,7 @@ func (pool *ConnectionPool) Start() error {
 	slog.Info("Channels shuffled - load will be distributed evenly across connections")
 
 	// Recalculate channels per connection based on actual discovered channels
-	actualChannelsPerConnection := len(allChannels) / numConnections
+	actualChannelsPerConnection := (len(allChannels) + numConnections - 1) / numConnections
 	if actualChannelsPerConnection == 0 {
 		actualChannelsPerConnection = 1
 	}
@@ -291,26 +270,44 @@ func (pool *ConnectionPool) Start() error {
 		conn := pool.createIRCConnection(i, connectionChannels)
 
 		pool.mu.Lock()
+		if pool.stopping {
+			pool.mu.Unlock()
+			conn.Shutdown()
+			return pool.ctx.Err()
+		}
 		pool.connections = append(pool.connections, conn)
+		pool.workerWg.Add(1)
 		pool.mu.Unlock()
 
 		slog.Info("Starting connection", "current", i+1, "total", numConnections)
 
 		// Start this connection in a goroutine
-		go pool.runConnection(i, conn, connectionChannels)
+		go func() {
+			defer pool.workerWg.Done()
+			pool.runConnection(i, conn, connectionChannels)
+		}()
 
 		// Wait before starting next connection (except for last one)
 		if i < numConnections-1 {
 			slog.Info("Waiting before starting next connection", "delay", connectionDelay)
-			time.Sleep(connectionDelay)
+			if !waitContext(pool.ctx, connectionDelay) {
+				return pool.ctx.Err()
+			}
 		}
 	}
 
 	// Start aggregated statistics reporting
-	go pool.reportAggregatedStats()
+	pool.workerWg.Add(2)
+	go func() {
+		defer pool.workerWg.Done()
+		pool.reportAggregatedStats()
+	}()
 
 	// Start periodic channel discovery and redistribution
-	go pool.periodicChannelRediscovery()
+	go func() {
+		defer pool.workerWg.Done()
+		pool.periodicChannelRediscovery()
+	}()
 
 	slog.Info("Connection pool started", "active_connections", len(pool.connections))
 
@@ -323,87 +320,80 @@ func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []str
 	conn.ID = fmt.Sprintf("conn-%d", connectionID)
 
 	// Pre-assign channels to this IRC connection
-	conn.Channels = channels
+	conn.cancel()
+	conn.ctx, conn.cancel = context.WithCancel(pool.ctx)
+	conn.assignChannels(channels)
 
 	return conn
 }
 
 // runConnection runs a single connection
 func (pool *ConnectionPool) runConnection(connectionID int, conn *IRCConnection, channels []string) {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Info("Panic recovered", "connection_id", connectionID, "panic", r)
-		}
-	}()
-
-	slog.Info("Starting connection", "connection_id", connectionID, "channels", len(channels))
-
-	for {
-		select {
-		case <-pool.ctx.Done():
-			slog.Info("Connection shutting down", "connection_id", connectionID)
-			return
-		default:
-			// Connect to IRC
-			if err := conn.connect(); err != nil {
-				slog.Error("Connection error, retrying", "connection_id", connectionID, "error", err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			slog.Info("Connection connected successfully", "connection_id", connectionID)
-
-			// Start reading chat in a separate goroutine
-			chatDone := make(chan error, 1)
-			go func() {
-				// infiniteReadChat runs forever and handles its own reconnections
-				// But if it returns, something serious happened
-				slog.Info("Starting chat reader", "connection_id", connectionID)
-				conn.infiniteReadChat()
-				chatDone <- fmt.Errorf("infiniteReadChat exited")
-			}()
-
-			// Give the chat reader a moment to start and authenticate
-			time.Sleep(500 * time.Millisecond)
-
-			// Add staggered delay based on connection ID to prevent all connections
-			// from joining channels simultaneously (which causes message burst)
-			staggerDelay := time.Duration(connectionID*1) * time.Second
-			if staggerDelay > 0 {
-				slog.Info("Waiting before joining channels (staggered start)", "connection_id", connectionID, "delay", staggerDelay)
-
-				// Use select to allow cancellation during wait
-				select {
-				case <-time.After(staggerDelay):
-					// Continue to channel joining
-				case <-pool.ctx.Done():
-					slog.Info("Cancelled during stagger delay", "connection_id", connectionID)
-					return
-				}
-			}
-
-			// Join assigned channels
-			slog.Info("Joining channels", "connection_id", connectionID, "count", len(channels))
-			go conn.joinNewChannels(channels)
-			slog.Info("Finished joining channels", "connection_id", connectionID)
-
-			// Wait for either context cancellation or chat reader error
+	// Also handles independently constructed connections used by callers/tests.
+	stopCancellation := context.AfterFunc(pool.ctx, conn.Shutdown)
+	defer stopCancellation()
+	defer conn.Shutdown()
+	conn.assignChannels(channels)
+	failures := 0
+	for pool.ctx.Err() == nil && conn.ctx.Err() == nil {
+		connectedAt := time.Now()
+		err := conn.connect()
+		if err == nil {
+			sessionCtx, cancelSession := context.WithCancel(pool.ctx)
+			done := make(chan error, 2)
+			go func() { done <- conn.readChat() }()
+			go func() { done <- conn.runChannelJoins(sessionCtx) }()
+			completed := 0
 			select {
+			case err = <-done:
+				completed = 1
 			case <-pool.ctx.Done():
-				slog.Info("Connection shutting down", "connection_id", connectionID)
-				return
-			case err := <-chatDone:
-				slog.Error("Chat reader exited, reconnecting", "connection_id", connectionID, "error", err)
-				// Close connection and loop to reconnect
-				if conn.Connection != nil {
-					_ = conn.Connection.Close() // Explicitly ignore error in reconnection cleanup
-				}
-				conn.IsConnected = false
-				time.Sleep(2 * time.Second)
-				continue
+				err = pool.ctx.Err()
 			}
+			cancelSession()
+			conn.closeSocket()
+			// Neither reader nor JOIN writer can touch a replacement socket.
+			for ; completed < 2; completed++ {
+				<-done
+			}
+		}
+		conn.closeSocket()
+		metrics.UpdateConnectionStatus(conn.ID, false)
+		if pool.ctx.Err() != nil || conn.ctx.Err() != nil {
+			return
+		}
+		if time.Since(connectedAt) > time.Minute {
+			failures = 0
+		}
+		failures++
+		metrics.RecordReconnect(conn.ID)
+		backoff := reconnectBackoff(failures)
+		slog.Warn("IRC connection failed; retrying", "connection_id", connectionID, "error", err, "backoff", backoff)
+		if !waitContext(conn.ctx, backoff) {
+			return
 		}
 	}
+}
+
+// reconnectBackoff returns an exponential backoff with jitter for the given
+// number of consecutive failures. Spacing retries out (instead of the old flat
+// 2s) is what stops a single disconnect from cascading into a reconnect storm,
+// and the jitter de-synchronises many connections that drop at the same time.
+func reconnectBackoff(consecutiveFailures int) time.Duration {
+	const base = 2 * time.Second
+	const maxBackoff = 2 * time.Minute
+
+	d := base
+	for i := 1; i < consecutiveFailures && d < maxBackoff; i++ {
+		d *= 2
+	}
+	if d > maxBackoff {
+		d = maxBackoff
+	}
+
+	// +/- 25% jitter.
+	jitter := time.Duration(rand.Int63n(int64(d)/2)) - d/4
+	return d + jitter
 }
 
 // discoverAllChannels fetches all channels from Twitch API
@@ -415,12 +405,14 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 	}()
 
 	var channels []string
+	seen := make(map[string]bool)
+	seenCursors := make(map[string]bool)
 	cursor := ""
 	pageSize := 100
 
 	for len(channels) < pool.totalChannels {
 		slog.Info("Fetching channels", "count_so_far", len(channels))
-		streamsResp, err := pool.twitchClient.GetStreams(pageSize, cursor)
+		streamsResp, err := pool.twitchClient.GetStreamsContext(pool.ctx, pageSize, cursor)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get streams: %v", err)
 		}
@@ -439,7 +431,10 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 			}
 
 			channelName := "#" + stream.UserLogin
-			channels = append(channels, channelName)
+			if stream.UserLogin != "" && !seen[channelName] {
+				channels = append(channels, channelName)
+				seen[channelName] = true
+			}
 
 			if len(channels) >= pool.totalChannels {
 				break
@@ -452,7 +447,13 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 		}
 
 		cursor = streamsResp.Pagination.Cursor
-		time.Sleep(10 * time.Millisecond)
+		if seenCursors[cursor] {
+			return nil, fmt.Errorf("Twitch repeated a pagination cursor")
+		}
+		seenCursors[cursor] = true
+		if !waitContext(pool.ctx, 10*time.Millisecond) {
+			return nil, pool.ctx.Err()
+		}
 	}
 
 	metrics.ChannelsDiscovered.Set(float64(len(channels)))
@@ -478,20 +479,26 @@ func (pool *ConnectionPool) reportAggregatedStats() {
 			activeConnections := 0
 
 			for i, conn := range pool.connections {
-				if conn.IsConnected {
+				connected := conn.IsConnected.Load()
+				if connected {
 					activeConnections++
 				}
-				totalMessages += conn.NMessages
-				totalChannels += len(conn.connectedChannels)
+				nMessages := int(conn.NMessages.Load())
+				totalMessages += nMessages
+
+				conn.channelsMutex.RLock()
+				nChannels := len(conn.connectedChannels)
+				conn.channelsMutex.RUnlock()
+				totalChannels += nChannels
 
 				// Update per-connection metrics
 				connID := fmt.Sprintf("conn-%d", i)
-				metrics.JoinedChannelsPerConnection.WithLabelValues(connID).Set(float64(len(conn.connectedChannels)))
-				metrics.UpdateConnectionStatus(connID, conn.IsConnected)
+				metrics.JoinedChannelsPerConnection.WithLabelValues(connID).Set(float64(nChannels))
+				metrics.UpdateConnectionStatus(connID, connected)
 
 				// Individual connection stats (less frequent)
 				if totalMessages%10 == 0 {
-					slog.Info("Connection stats", "conn_id", i, "messages", conn.NMessages, "channels", len(conn.connectedChannels), "connected", conn.IsConnected)
+					slog.Info("Connection stats", "conn_id", i, "messages", nMessages, "channels", nChannels, "connected", connected)
 				}
 			}
 
@@ -553,99 +560,7 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 				newChannels[i], newChannels[j] = newChannels[j], newChannels[i]
 			})
 
-			// Get currently connected channels across all connections
-			pool.mu.RLock()
-			currentChannels := make(map[string]bool)
-			for _, conn := range pool.connections {
-				conn.channelsMutex.RLock()
-				for channel := range conn.connectedChannels {
-					currentChannels[channel] = true
-				}
-				conn.channelsMutex.RUnlock()
-			}
-			numConnections := len(pool.connections)
-			pool.mu.RUnlock()
-
-			// Determine new channels to join and old channels to part
-			newChannelSet := make(map[string]bool)
-			for _, ch := range newChannels {
-				newChannelSet[ch] = true
-			}
-
-			channelsToJoin := []string{}
-			for _, ch := range newChannels {
-				if !currentChannels[ch] {
-					channelsToJoin = append(channelsToJoin, ch)
-				}
-			}
-
-			offlineChannels := 0
-			for ch := range currentChannels {
-				if !newChannelSet[ch] {
-					offlineChannels++
-				}
-			}
-
-			slog.Info("Channel delta", "new_channels", len(channelsToJoin), "offline_channels", offlineChannels)
-
-			// Note: We do NOT part from offline channels - they stay joined in case they come back online
-
-			// Distribute new channels across connections WITH STAGGERING
-			// This prevents message burst spikes by spacing out the JOINs
-			if len(channelsToJoin) > 0 {
-				channelsPerConn := len(channelsToJoin) / numConnections
-				if channelsPerConn == 0 {
-					channelsPerConn = 1
-				}
-
-				slog.Info("Joining new channels across connections with staggering", "new_channels", len(channelsToJoin), "connections", numConnections)
-
-				pool.mu.RLock()
-				for i, conn := range pool.connections {
-					startIdx := i * channelsPerConn
-					endIdx := startIdx + channelsPerConn
-
-					if i == numConnections-1 {
-						// Last connection gets remaining channels
-						endIdx = len(channelsToJoin)
-					}
-
-					if startIdx >= len(channelsToJoin) {
-						break
-					}
-
-					if endIdx > len(channelsToJoin) {
-						endIdx = len(channelsToJoin)
-					}
-
-					connChannels := channelsToJoin[startIdx:endIdx]
-					if len(connChannels) > 0 {
-						// Stagger channel joining across connections to prevent message burst
-						staggerDelay := time.Duration(i*15) * time.Second
-						slog.Info("Assigning new channels", "id", conn.ID, "new_channels", len(connChannels), "stagger_delay", staggerDelay)
-
-						// Capture variables for goroutine
-						connection := conn
-						channels := connChannels
-
-						go func() {
-							if staggerDelay > 0 {
-								slog.Info("REDISCOVERY: Waiting before joining new channels", "id", connection.ID, "delay", staggerDelay)
-								time.Sleep(staggerDelay)
-							}
-
-							joinStart := time.Now()
-							slog.Info("REDISCOVERY: Starting to join new channels", "id", connection.ID, "channels", len(channels), "time", time.Now().Format("15:04:05"))
-
-							connection.joinNewChannels(channels)
-
-							joinDuration := time.Since(joinStart)
-							slog.Info("REDISCOVERY: Completed joining channels", "id", connection.ID, "channels", len(channels), "duration", joinDuration.Seconds(), "time", time.Now().Format("15:04:05"))
-						}()
-					}
-				}
-				pool.mu.RUnlock()
-			}
+			pool.assignDiscoveredChannels(newChannels)
 
 			slog.Info("Channel rediscovery and redistribution initiated (staggered joining in progress)")
 		}
@@ -654,32 +569,67 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 
 // Shutdown gracefully shuts down all connections
 func (pool *ConnectionPool) Shutdown() {
-	slog.Info("Shutting down connection pool")
+	pool.shutdownOnce.Do(func() {
+		pool.mu.Lock()
+		pool.stopping = true
+		pool.cancel()
+		connections := append([]*IRCConnection(nil), pool.connections...)
+		pool.mu.Unlock()
+		for _, conn := range connections {
+			conn.Shutdown()
+		}
+		pool.workerWg.Wait()
+		if pool.centralMessageChan != nil {
+			close(pool.centralMessageChan)
+		}
+		pool.dbWriterWg.Wait()
+		if pool.sharedDB != nil {
+			pool.sharedDB.Close()
+		}
+		slog.Info("Connection pool shutdown complete")
+	})
+}
 
-	pool.cancel() // Cancel context to stop all goroutines
-
-	// Wait for centralized DB writer to finish
-	slog.Info("Waiting for DB writer to finish")
-	pool.dbWriterWg.Wait()
-
-	time.Sleep(2 * time.Second) // Give time for other goroutines to finish
-
+// Assign using desired membership, even when a socket is reconnecting. This
+// prevents duplicates across connections and keeps configured capacity bounded.
+func (pool *ConnectionPool) assignDiscoveredChannels(channels []string) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-
-	// Shutdown each connection
+	if pool.stopping {
+		return
+	}
+	assigned := make(map[string]bool)
+	loads := make([]int, len(pool.connections))
 	for i, conn := range pool.connections {
-		slog.Info("Shutting down connection", "index", i)
-		conn.Shutdown()
+		conn.channelsMutex.RLock()
+		loads[i] = len(conn.Channels)
+		for _, channel := range conn.Channels {
+			assigned[channel] = true
+		}
+		conn.channelsMutex.RUnlock()
 	}
-
-	// Close shared database
-	if pool.sharedDB != nil {
-		time.Sleep(100 * time.Millisecond)
-		pool.sharedDB.Close()
+	skipped := 0
+	for _, channel := range channels {
+		if assigned[channel] {
+			continue
+		}
+		best := -1
+		for i, load := range loads {
+			if load < pool.channelsPerConnection && (best == -1 || load < loads[best]) {
+				best = i
+			}
+		}
+		if best == -1 || len(assigned) >= pool.totalChannels {
+			skipped++
+			continue
+		}
+		pool.connections[best].assignChannels([]string{channel})
+		loads[best]++
+		assigned[channel] = true
 	}
-
-	slog.Info("Connection pool shutdown complete")
+	if skipped > 0 {
+		slog.Warn("Channel capacity reached; retaining existing assignments", "skipped", skipped)
+	}
 }
 
 // GetStats returns aggregated statistics
@@ -692,11 +642,14 @@ func (pool *ConnectionPool) GetStats() map[string]interface{} {
 	activeConnections := 0
 
 	for _, conn := range pool.connections {
-		if conn.IsConnected {
+		if conn.IsConnected.Load() {
 			activeConnections++
 		}
-		totalMessages += conn.NMessages
+		totalMessages += int(conn.NMessages.Load())
+
+		conn.channelsMutex.RLock()
 		totalChannels += len(conn.connectedChannels)
+		conn.channelsMutex.RUnlock()
 	}
 
 	return map[string]interface{}{

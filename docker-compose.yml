@@ -1,6 +1,23 @@
 version: '3.8'
 
 services:
+  ch-ui:
+    image: ghcr.io/caioricciuti/ch-ui:latest
+    profiles: ["ch-ui"]
+    restart: "no"
+    ports:
+      - "5521:3488"
+    environment:
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CONNECTION_NAME: "Poglytics"
+      APP_URL: "${CH_UI_APP_URL:-http://localhost:5521}"
+    volumes:
+      - ch-ui-data:/app/data
+    depends_on:
+      - clickhouse
+    networks:
+      - twitch-chat-network
+
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: twitch-chat-clickhouse
@@ -30,3 +47,6 @@ services:
 networks:
   twitch-chat-network:
     driver: bridge
+
+volumes:
+  ch-ui-data:

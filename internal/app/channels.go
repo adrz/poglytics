@@ -1,109 +1,132 @@
 package app
 
 import (
+	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
 	"poglytics-scraper/internal/metrics"
 )
 
-// joinNewChannels joins channels that are not currently connected
-func (conn *IRCConnection) joinNewChannels(newChannels []string) {
+const (
+	joinChannelsPerCommand = 10
+	// Ten attempts every five seconds stays within the documented normal-account
+	// rate of 20 per ten seconds. Anonymous connection limits are undocumented.
+	joinInterval = 5 * time.Second
+)
+
+// assignChannels keeps the desired assignment separate from the current socket's
+// joined channels, so reconnects and rediscovery cannot lose pending work.
+func (conn *IRCConnection) assignChannels(channels []string) {
 	conn.channelsMutex.Lock()
-	defer conn.channelsMutex.Unlock()
-
-	var channelsToJoin []string
-
-	for _, channel := range newChannels {
-		if !conn.connectedChannels[channel] {
-			channelsToJoin = append(channelsToJoin, channel)
+	seen := make(map[string]bool, len(conn.Channels))
+	for _, channel := range conn.Channels {
+		seen[channel] = true
+	}
+	for _, channel := range channels {
+		if !seen[channel] {
+			conn.Channels = append(conn.Channels, channel)
+			seen[channel] = true
 		}
 	}
-
-	if len(channelsToJoin) == 0 {
-		return
+	conn.channelsMutex.Unlock()
+	select {
+	case conn.joinUpdates <- struct{}{}:
+	default:
 	}
-
-	slog.Info("Joining new channels", "id", conn.ID, "count", len(channelsToJoin))
-
-	// Join channels with rate limiting to avoid Twitch IRC limits
-	// Twitch allows ~50 JOIN commands per 15 seconds (conservative estimate)
-	batchSize := 50               // Join 50 channels at a time
-	batchDelay := 5 * time.Second // Wait 10 seconds between batches
-
-	for i := 0; i < len(channelsToJoin); i += batchSize {
-		end := i + batchSize
-		if end > len(channelsToJoin) {
-			end = len(channelsToJoin)
-		}
-
-		batchStart := time.Now()
-		successCount := 0
-
-		currentBatch := channelsToJoin[i:end]
-		innerBatchSize := 5
-		for j := 0; j < len(currentBatch); j += innerBatchSize {
-			innerEnd := j + innerBatchSize
-			if innerEnd > len(currentBatch) {
-				innerEnd = len(currentBatch)
-			}
-			batch := currentBatch[j:innerEnd]
-
-			// Join the inner batch of channels
-			// join #channel1, #channel2, ...
-			if err := conn.joinChannel(batch); err != nil {
-				slog.Error("Error joining batch", "id", conn.ID, "batch", batch, "error", err)
-				continue
-			}
-
-			for _, channel := range batch {
-				conn.connectedChannels[channel] = true
-				successCount++
-			}
-			time.Sleep(500 * time.Millisecond) // Minimal delay between batches
-		}
-
-		slog.Info("Joined channels in batch", "id", conn.ID, "joined", successCount, "total_in_batch", end-i, "batch", (i/batchSize)+1, "total_batches", (len(channelsToJoin)+batchSize-1)/batchSize, "duration", time.Since(batchStart).Seconds())
-
-		// Wait for the rest of the batch period if we finished early
-		if end < len(channelsToJoin) {
-			elapsed := time.Since(batchStart)
-			if elapsed < batchDelay {
-				remaining := batchDelay - elapsed
-				slog.Info("Rate limiting: waiting before next batch", "id", conn.ID, "wait_seconds", remaining.Seconds())
-				time.Sleep(remaining)
-			}
-		}
-	}
-
-	slog.Info("Finished joining all channels", "id", conn.ID)
 }
 
-// joinChannel joins multiple channels in a single JOIN command
+func (conn *IRCConnection) joinNewChannels(channels []string) {
+	conn.assignChannels(channels)
+	_ = conn.joinAssignedChannels(conn.ctx)
+}
+
+// runChannelJoins is started and awaited by the socket's owner. Rediscovery
+// only updates assignments; it never starts another socket writer.
+func (conn *IRCConnection) runChannelJoins(ctx context.Context) error {
+	for {
+		if err := conn.joinAssignedChannels(ctx); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-conn.joinUpdates:
+		}
+	}
+}
+
+func (conn *IRCConnection) joinAssignedChannels(ctx context.Context) error {
+	conn.joinMu.Lock()
+	defer conn.joinMu.Unlock()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		conn.channelsMutex.RLock()
+		batch := make([]string, 0, joinChannelsPerCommand)
+		for _, channel := range conn.Channels {
+			if !conn.connectedChannels[channel] {
+				batch = append(batch, channel)
+				if len(batch) == joinChannelsPerCommand {
+					break
+				}
+			}
+		}
+		conn.channelsMutex.RUnlock()
+		if len(batch) == 0 {
+			return nil
+		}
+		if !waitContext(ctx, time.Until(conn.nextJoinAt)) {
+			return ctx.Err()
+		}
+		if err := conn.joinChannel(batch); err != nil {
+			return err
+		}
+		conn.nextJoinAt = time.Now().Add(joinInterval)
+	}
+}
+
 func (conn *IRCConnection) joinChannel(channels []string) error {
 	if len(channels) == 0 {
 		return nil
 	}
-
-	// Create comma-separated channel list
-	channelList := strings.Join(channels, ",")
-
-	if err := conn.send(fmt.Sprintf("JOIN %s", channelList)); err != nil {
-		// Record failure for all channels in batch
+	if err := conn.send(fmt.Sprintf("JOIN %s", strings.Join(channels, ","))); err != nil {
 		for range channels {
 			metrics.RecordChannelJoin(conn.ID, false)
 		}
 		return err
 	}
 
-	// Record success for all channels
+	// This records commands sent, not server-confirmed membership.
+	conn.channelsMutex.Lock()
+	defer conn.channelsMutex.Unlock()
 	for _, channel := range channels {
-		conn.NChannels++
-		conn.ListChannels = append(conn.ListChannels, channel)
+		if !conn.connectedChannels[channel] {
+			conn.connectedChannels[channel] = true
+			conn.ListChannels = append(conn.ListChannels, channel)
+			conn.NChannels.Add(1)
+		}
 		metrics.RecordChannelJoin(conn.ID, true)
 	}
-
 	return nil
+}
+
+func waitContext(ctx context.Context, delay time.Duration) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if delay <= 0 {
+		return true
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
 }

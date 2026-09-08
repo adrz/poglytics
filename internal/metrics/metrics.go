@@ -149,6 +149,14 @@ var (
 		Help: "Total number of read timeouts",
 	}, []string{"connection_id"})
 
+	// Notices records every Twitch NOTICE by msg-id. This is the ground-truth
+	// signal for why Twitch is unhappy (e.g. msg_ratelimit, join failures,
+	// channel suspended). Watch this when connections start dropping.
+	Notices = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "twitch_scraper_notices_total",
+		Help: "Total number of Twitch NOTICE messages by msg-id",
+	}, []string{"connection_id", "msg_id"})
+
 	// Twitch API rate limit metrics
 	TwitchAPIRateLimitRemaining = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "twitch_api_ratelimit_remaining",
@@ -217,6 +225,14 @@ func RecordParseError(connectionID, errorType string) {
 // RecordReadTimeout records a read timeout
 func RecordReadTimeout(connectionID string) {
 	ReadTimeouts.WithLabelValues(connectionID).Inc()
+}
+
+// RecordNotice records a Twitch NOTICE by its msg-id
+func RecordNotice(connectionID, msgID string) {
+	if msgID == "" {
+		msgID = "unknown"
+	}
+	Notices.WithLabelValues(connectionID, msgID).Inc()
 }
 
 // RecordReconnect records a connection reconnect

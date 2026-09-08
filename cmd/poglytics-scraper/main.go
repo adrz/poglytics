@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"poglytics-scraper/internal/app"
+	"poglytics-scraper/internal/config"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -22,29 +23,30 @@ func main() {
 	channelsPerConnection := 1500 // Channels per IRC connection (safe limit for justinfan)
 	metricsPort := 9091           // Port for Prometheus metrics endpoint
 
-	// Allow override via environment variables
-	if envMax := os.Getenv("MAX_CHANNELS"); envMax != "" {
-		if val, err := strconv.Atoi(envMax); err == nil {
-			maxChannels = val
-		}
+	env, err := config.LoadEnv()
+	if err != nil {
+		logger.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
 	}
-
-	if envPerConn := os.Getenv("CHANNELS_PER_CONNECTION"); envPerConn != "" {
-		if val, err := strconv.Atoi(envPerConn); err == nil {
-			channelsPerConnection = val
-		}
-	}
-
-	if envMetricsPort := os.Getenv("METRICS_PORT"); envMetricsPort != "" {
-		if val, err := strconv.Atoi(envMetricsPort); err == nil {
-			metricsPort = val
+	for key, target := range map[string]*int{
+		"MAX_CHANNELS":            &maxChannels,
+		"CHANNELS_PER_CONNECTION": &channelsPerConnection,
+		"METRICS_PORT":            &metricsPort,
+	} {
+		if value := env[key]; value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 || (key == "METRICS_PORT" && parsed > 65535) {
+				logger.Error("Invalid positive integer configuration", "key", key)
+				os.Exit(1)
+			}
+			*target = parsed
 		}
 	}
 
 	logger.Info("Starting Twitch chat scraper with connection pooling",
 		"total_channels", maxChannels,
 		"channels_per_connection", channelsPerConnection,
-		"estimated_connections", (maxChannels+channelsPerConnection-1)/channelsPerConnection,
+		"estimated_connections", 1+(maxChannels-1)/channelsPerConnection,
 		"metrics_port", metricsPort)
 
 	// Start Prometheus metrics HTTP server

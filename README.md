@@ -65,9 +65,20 @@ The scraper uses a connection pool architecture where multiple IRC connections a
 2. Build and run the scraper:
 
    ```bash
-   ./scripts/build.sh
+   make build
    ./build/poglytics-scraper
    ```
+
+CH-UI is optional and starts only when explicitly selected:
+
+```bash
+docker compose up -d ch-ui
+```
+
+Open <http://localhost:5521> and log in with the Compose ClickHouse credentials
+(`default` / `changeme`). CH-UI connects to `clickhouse:8123` over the Docker network
+and stores its settings in a named volume. Set `CH_UI_APP_URL` if accessing it at
+a different public URL. Stop it with `docker compose stop ch-ui`.
 
 ### Running the Monitoring Stack
 
@@ -164,20 +175,19 @@ The scraper exposes comprehensive Prometheus metrics:
 ### Building
 
 ```bash
-./scripts/build.sh
+make build
 ```
 
-This creates binaries in the `build/` directory:
-
-- `poglytics-scraper`: Main scraper application
-- `analytics`: Data analysis tools
-- `query-db`: Database query utilities
+This creates `build/poglytics-scraper`. Use `make run` to build and start it,
+`make fmt` to format Go code, or `make clean` to remove the binary.
 
 ### Testing
 
 ```bash
-go test ./...
+make test
 ```
+
+Tests run with the race detector. Use `make check` to also run `go vet`.
 
 ### Code Structure
 

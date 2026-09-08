@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"poglytics-scraper/internal/twitch"
@@ -34,9 +35,9 @@ type IRCConnection struct {
 	Nickname     string
 	Port         int
 	Channels     []string
-	IsConnected  bool
-	NMessages    int
-	NChannels    int
+	IsConnected  atomic.Bool
+	NMessages    atomic.Int64
+	NChannels    atomic.Int64
 	ListChannels []string
 	Connection   net.Conn
 	Reader       *bufio.Reader
@@ -44,11 +45,19 @@ type IRCConnection struct {
 	messageChan  chan *ChatMessage
 	ctx          context.Context
 	cancel       context.CancelFunc
+	writeMu      sync.Mutex   // serializes writes to Connection (JOIN, PONG, auth)
+	connectionMu sync.RWMutex // protects socket/reader publication and closure
+	readPartial  []byte       // owned by the single socket reader
 
 	// New fields for channel discovery
 	TwitchClient      *twitch.Client
 	channelsMutex     sync.RWMutex
 	connectedChannels map[string]bool
+
+	// One join worker per socket generation; assignments survive reconnects.
+	joinMu      sync.Mutex
+	joinUpdates chan struct{}
+	nextJoinAt  time.Time
 }
 
 // ChatMessage represents a single chat message or IRC event

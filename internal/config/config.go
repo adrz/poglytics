@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -12,15 +13,10 @@ func LoadEnv() (map[string]string, error) {
 
 	file, err := os.Open(".env")
 	if err != nil {
-		// Try to get from environment variables if .env file doesn't exist
-		if clientID := os.Getenv("CLIENT_ID"); clientID != "" {
-			env["CLIENT_ID"] = clientID
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("open .env: %w", err)
 		}
-		if clientSecret := os.Getenv("CLIENT_SECRET"); clientSecret != "" {
-			env["CLIENT_SECRET"] = clientSecret
-		}
-		// Load database configuration from environment
-		loadDBEnvVars(env)
+		loadSystemEnv(env)
 		return env, nil
 	}
 	defer func() { _ = file.Close() }()
@@ -37,33 +33,28 @@ func LoadEnv() (map[string]string, error) {
 			key := strings.TrimSpace(parts[0])
 			value := strings.TrimSpace(parts[1])
 			// Remove quotes if present
-			if (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")) ||
-				(strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) {
+			if strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+				if len(value) < 2 || value[len(value)-1] != value[0] {
+					return nil, fmt.Errorf("unmatched quote in .env for %s", key)
+				}
 				value = value[1 : len(value)-1]
 			}
 			env[key] = value
 		}
 	}
 
+	loadSystemEnv(env)
 	return env, scanner.Err()
 }
 
-// loadDBEnvVars loads database configuration from environment variables
-func loadDBEnvVars(env map[string]string) {
-	dbVars := []string{
-		"DB_TYPE",
-		"DB_HOST",
-		"DB_PORT",
-		"DB_USER",
-		"DB_PASSWORD",
-		"DB_NAME",
-		"DB_SSLMODE",
-		"DB_PATH",
-	}
-
-	for _, varName := range dbVars {
-		if value := os.Getenv(varName); value != "" {
-			env[varName] = value
+// Process values override file defaults, including explicitly empty values.
+func loadSystemEnv(env map[string]string) {
+	for _, key := range []string{
+		"CLIENT_ID", "CLIENT_SECRET", "MAX_CHANNELS", "CHANNELS_PER_CONNECTION", "METRICS_PORT",
+		"DB_TYPE", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSLMODE", "DB_PATH",
+	} {
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
 		}
 	}
 }
@@ -82,7 +73,11 @@ func GetDBConfig(env map[string]string) map[string]string {
 
 	dbConfig["type"] = GetDBType(env)
 	dbConfig["host"] = getEnvOrDefault(env, "DB_HOST", "localhost")
-	dbConfig["port"] = getEnvOrDefault(env, "DB_PORT", "5432")
+	port := "5432"
+	if dbConfig["type"] == "clickhouse" {
+		port = "9000"
+	}
+	dbConfig["port"] = getEnvOrDefault(env, "DB_PORT", port)
 	dbConfig["user"] = getEnvOrDefault(env, "DB_USER", "")
 	dbConfig["password"] = getEnvOrDefault(env, "DB_PASSWORD", "")
 	dbConfig["database"] = getEnvOrDefault(env, "DB_NAME", "twitch_chat")

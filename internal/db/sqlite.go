@@ -30,6 +30,9 @@ func (s *SQLiteDB) InitDB() error {
 		return fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
+	// Chat batches and stream discovery share this database. Serialize writes
+	// through one connection to avoid competing SQLite writer transactions.
+	db.SetMaxOpenConns(1)
 	s.db = db
 
 	// Create all tables

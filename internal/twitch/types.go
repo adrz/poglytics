@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"poglytics-scraper/internal/db"
@@ -14,6 +15,8 @@ type Client struct {
 	AccessToken  string
 	HTTPClient   *http.Client
 	DB           db.Database
+	tokenMu      sync.Mutex
+	tokenExpires time.Time
 }
 
 // TokenResponse represents the OAuth token response from Twitch

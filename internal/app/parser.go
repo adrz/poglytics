@@ -61,7 +61,7 @@ func (c *IRCConnection) parseIRCMessage(rawMessage string) *ChatMessage {
 		// Log other message types for debugging
 		return &ChatMessage{
 			MessageType: "other",
-			Timestamp:   time.Now(),
+			Timestamp:   eventTimestamp(tags),
 			RawMessage:  rawMessage,
 		}
 	}
@@ -80,16 +80,9 @@ func parseTags(tagString string) map[string]string {
 
 	pairs := strings.Split(tagString, ";")
 	for _, pair := range pairs {
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			// Unescape IRC tag values according to IRCv3 spec
-			value := parts[1]
-			value = strings.ReplaceAll(value, "\\s", " ")
-			value = strings.ReplaceAll(value, "\\:", ";")
-			value = strings.ReplaceAll(value, "\\n", "\n")
-			value = strings.ReplaceAll(value, "\\r", "\r")
-			value = strings.ReplaceAll(value, "\\\\", "\\")
-			tags[parts[0]] = value
+		key, value, _ := strings.Cut(pair, "=")
+		if key != "" {
+			tags[key] = unescapeTag(value)
 		}
 	}
 	return tags
@@ -103,25 +96,16 @@ func parsePRIVMSG(rawMessage string, tags map[string]string, parts []string, com
 
 	channel := parts[commandIdx+1]
 
-	// Extract message (everything after " :" that follows the channel name)
-	// Format: :user!user@user.tmi.twitch.tv PRIVMSG #channel :message
-	// We need to find " :" that appears AFTER the channel name
-	channelEnd := strings.Index(rawMessage, channel)
-	if channelEnd == -1 {
+	message, ok := trailingIRCParameter(rawMessage)
+	if !ok {
 		return nil
 	}
-	// Look for " :" after the channel name
-	colonIdx := strings.Index(rawMessage[channelEnd:], " :")
-	if colonIdx == -1 {
-		return nil
-	}
-	message := rawMessage[channelEnd+colonIdx+2:]
 
 	msg := &ChatMessage{
 		MessageType: "text_message",
 		Channel:     channel,
 		Message:     message,
-		Timestamp:   time.Now(),
+		Timestamp:   eventTimestamp(tags),
 		Tags:        tags,
 		RawMessage:  rawMessage,
 	}
@@ -168,20 +152,15 @@ func parseCLEARCHAT(rawMessage string, tags map[string]string, parts []string, c
 	msg := &ChatMessage{
 		MessageType: "ban",
 		Channel:     channel,
-		Timestamp:   time.Now(),
+		Timestamp:   eventTimestamp(tags),
 		Tags:        tags,
 		RawMessage:  rawMessage,
 	}
 
-	// Check if there's a username (ban/timeout) or if it's a full chat clear
-	if commandIdx+2 < len(parts) {
-		// Extract target user (everything after the second colon or just the next part)
-		if strings.Contains(rawMessage, " :") {
-			colonIdx := strings.Index(rawMessage, " :")
-			msg.TargetUser = strings.TrimSpace(rawMessage[colonIdx+2:])
-		} else if commandIdx+2 < len(parts) {
-			msg.TargetUser = parts[commandIdx+2]
-		}
+	msg.TargetUser, _ = trailingIRCParameter(rawMessage)
+	if msg.TargetUser == "" {
+		msg.MessageType = "clear_chat"
+		return msg
 	}
 
 	// Extract ban duration from tags (0 = permanent ban)
@@ -209,17 +188,13 @@ func parseCLEARMSG(rawMessage string, tags map[string]string, parts []string, co
 	channel := parts[commandIdx+1]
 
 	// Extract the deleted message text
-	var message string
-	if strings.Contains(rawMessage, " :") {
-		colonIdx := strings.Index(rawMessage, " :")
-		message = rawMessage[colonIdx+2:]
-	}
+	message, _ := trailingIRCParameter(rawMessage)
 
 	msg := &ChatMessage{
 		MessageType: "delete_message",
 		Channel:     channel,
 		Message:     message,
-		Timestamp:   time.Now(),
+		Timestamp:   eventTimestamp(tags),
 		Tags:        tags,
 		RawMessage:  rawMessage,
 	}
@@ -241,17 +216,13 @@ func parseUSERNOTICE(rawMessage string, tags map[string]string, parts []string, 
 	channel := parts[commandIdx+1]
 
 	// Extract user message if present
-	var userMessage string
-	if strings.Contains(rawMessage, " :") {
-		colonIdx := strings.Index(rawMessage, " :")
-		userMessage = rawMessage[colonIdx+2:]
-	}
+	userMessage, _ := trailingIRCParameter(rawMessage)
 
 	msg := &ChatMessage{
 		MessageType: "subscription", // Default, will be refined based on msg-id
 		Channel:     channel,
 		Message:     userMessage,
-		Timestamp:   time.Now(),
+		Timestamp:   eventTimestamp(tags),
 		Tags:        tags,
 		RawMessage:  rawMessage,
 	}
@@ -342,18 +313,14 @@ func parseNOTICE(rawMessage string, tags map[string]string, parts []string, comm
 	channel := parts[commandIdx+1]
 
 	// Extract notice message
-	var message string
-	if strings.Contains(rawMessage, " :") {
-		colonIdx := strings.Index(rawMessage, " :")
-		message = rawMessage[colonIdx+2:]
-	}
+	message, _ := trailingIRCParameter(rawMessage)
 
 	msg := &ChatMessage{
 		MessageType:   "notice",
 		Channel:       channel,
 		Message:       message,
 		SystemMessage: message,
-		Timestamp:     time.Now(),
+		Timestamp:     eventTimestamp(tags),
 		Tags:          tags,
 		RawMessage:    rawMessage,
 	}
@@ -380,9 +347,7 @@ func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, 
 	var targetUser string
 	var viewerCount int
 
-	if strings.Contains(rawMessage, " :") {
-		colonIdx := strings.Index(rawMessage, " :")
-		trailing := strings.TrimSpace(rawMessage[colonIdx+2:])
+	if trailing, ok := trailingIRCParameter(rawMessage); ok {
 		trailingParts := strings.Fields(trailing)
 
 		if len(trailingParts) > 0 {
@@ -400,7 +365,7 @@ func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, 
 		Channel:     channel,
 		TargetUser:  targetUser,
 		ViewerCount: viewerCount,
-		Timestamp:   time.Now(),
+		Timestamp:   eventTimestamp(tags),
 		Tags:        tags,
 		RawMessage:  rawMessage,
 	}
@@ -450,3 +415,54 @@ func parseHOSTTARGET(rawMessage string, tags map[string]string, parts []string, 
 // 	}
 
 // }
+
+// trailingIRCParameter skips tags and the source prefix before finding the
+// trailing parameter. Only wire terminators are removed; text spaces matter.
+func trailingIRCParameter(raw string) (string, bool) {
+	rest := strings.TrimRight(raw, "\r\n")
+	for _, prefix := range []string{"@", ":"} {
+		if strings.HasPrefix(rest, prefix) {
+			_, after, ok := strings.Cut(rest, " ")
+			if !ok {
+				return "", false
+			}
+			rest = strings.TrimLeft(after, " ")
+		}
+	}
+	_, trailing, ok := strings.Cut(rest, " :")
+	return trailing, ok
+}
+
+func eventTimestamp(tags map[string]string) time.Time {
+	if millis, err := strconv.ParseInt(tags["tmi-sent-ts"], 10, 64); err == nil && millis > 0 {
+		return time.UnixMilli(millis)
+	}
+	return time.Now()
+}
+
+func unescapeTag(value string) string {
+	var out strings.Builder
+	out.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		if ch == '\\' {
+			i++
+			if i == len(value) {
+				break
+			}
+			ch = value[i]
+			switch ch {
+			case 's':
+				ch = ' '
+			case ':':
+				ch = ';'
+			case 'r':
+				ch = '\r'
+			case 'n':
+				ch = '\n'
+			}
+		}
+		out.WriteByte(ch)
+	}
+	return out.String()
+}
