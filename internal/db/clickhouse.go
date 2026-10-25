@@ -259,22 +259,22 @@ func (c *ClickHouseDB) SaveChatMessageBatch(messages interface{}) error {
 	other := []*ChatMessage{}
 
 	for _, msg := range chatMessages {
-		switch msg.MessageType {
-		case "text_message":
+		switch MessageTable(msg.MessageType) {
+		case "text_messages":
 			textMessages = append(textMessages, msg)
-		case "subscription", "resub", "subscription_gift", "mystery_subscription_gift":
+		case "subscriptions":
 			subscriptions = append(subscriptions, msg)
-		case "ban", "timeout":
+		case "bans":
 			bans = append(bans, msg)
-		case "delete_message", "clear_chat":
+		case "deleted_messages":
 			deletedMessages = append(deletedMessages, msg)
-		case "raid":
+		case "raids":
 			raids = append(raids, msg)
-		case "bits", "bits_badge_tier":
+		case "bits":
 			bits = append(bits, msg)
-		case "notice", "user_notice":
+		case "notices":
 			notices = append(notices, msg)
-		case "host_target":
+		case "hosts":
 			hosts = append(hosts, msg)
 		default:
 			other = append(other, msg)

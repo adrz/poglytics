@@ -50,8 +50,10 @@ func LoadEnv() (map[string]string, error) {
 // Process values override file defaults, including explicitly empty values.
 func loadSystemEnv(env map[string]string) {
 	for _, key := range []string{
-		"CLIENT_ID", "CLIENT_SECRET", "MAX_CHANNELS", "CHANNELS_PER_CONNECTION", "METRICS_PORT",
+		"CLIENT_ID", "CLIENT_SECRET", "MAX_CHANNELS", "CHANNELS_PER_CONNECTION", "JOINS_PER_SECOND", "METRICS_PORT",
 		"DB_TYPE", "DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSLMODE", "DB_PATH",
+		"DB_BATCH_MODE", "DB_BATCH_MESSAGE_ROWS", "DB_BATCH_EVENT_ROWS", "DB_BATCH_SNAPSHOT_ROWS",
+		"DB_BATCH_MESSAGE_INTERVAL", "DB_BATCH_EVENT_INTERVAL", "DB_BATCH_SNAPSHOT_INTERVAL", "DB_BATCH_MAX_BYTES",
 	} {
 		if value, ok := os.LookupEnv(key); ok {
 			env[key] = value

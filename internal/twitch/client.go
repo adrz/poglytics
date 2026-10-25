@@ -143,7 +143,7 @@ func (c *Client) GetStreamsContext(ctx context.Context, pageSize int, cursor str
 		if err := c.DB.SaveStreamSnapshots(snapshots); err != nil {
 			log.Printf("Warning: failed to save stream snapshots to database: %v", err)
 		} else {
-			log.Printf("Saved %d stream snapshots to database", len(snapshots))
+			slog.Debug("Submitted stream snapshots to database writer", "snapshots", len(snapshots))
 		}
 	}
 

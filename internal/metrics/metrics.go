@@ -43,6 +43,11 @@ var (
 		Help: "Total number of channel join attempts",
 	}, []string{"connection_id", "status"})
 
+	ChannelJoinRetries = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "twitch_scraper_channel_join_retries_total",
+		Help: "JOINs sent again because Twitch never confirmed the previous attempt",
+	})
+
 	// Connection metrics
 	ActiveConnections = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "twitch_scraper_active_connections",
@@ -85,6 +90,21 @@ var (
 	DBMessagesWritten = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "twitch_scraper_db_messages_written_total",
 		Help: "Total number of messages successfully written to database",
+	})
+
+	DBFlushRows = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "twitch_scraper_db_flush_rows", Help: "Rows per database flush (mixed in legacy mode)",
+		Buckets: []float64{1, 10, 50, 100, 500, 1000, 5000, 10000},
+	}, []string{"table", "reason"})
+	DBFlushOldestAge = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "twitch_scraper_db_flush_oldest_age_seconds", Help: "Age of oldest buffered row when database flush completes",
+		Buckets: []float64{0.1, 1, 5, 10, 30, 60, 120},
+	}, []string{"table"})
+	DBPendingRows = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "twitch_scraper_db_pending_rows", Help: "Rows buffered by database writer, excluding central IRC queue",
+	})
+	DBPendingBytes = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "twitch_scraper_db_pending_bytes", Help: "Estimated bytes buffered by database writer, excluding central IRC queue",
 	})
 
 	// Message buffer metrics
@@ -186,7 +206,19 @@ func RecordDBBatchInsert(duration float64, batchSize int, success bool) {
 	}
 }
 
-// UpdateMessageBufferMetrics updates the message buffer metrics
+// RecordDBTableFlush records completed writes, including stream snapshots.
+func RecordDBTableFlush(table, reason string, rows int, duration, oldestAge float64, success bool) {
+	RecordDBBatchInsert(duration, rows, success)
+	DBFlushRows.WithLabelValues(table, reason).Observe(float64(rows))
+	DBFlushOldestAge.WithLabelValues(table).Observe(oldestAge)
+}
+
+func UpdateDBBufferMetrics(rows, bytes int) {
+	DBPendingRows.Set(float64(rows))
+	DBPendingBytes.Set(float64(bytes))
+}
+
+// UpdateMessageBufferMetrics updates the central IRC queue metrics.
 func UpdateMessageBufferMetrics(size, capacity int) {
 	MessageBufferSize.Set(float64(size))
 	MessageBufferCapacity.Set(float64(capacity))

@@ -1,0 +1,505 @@
+{
+  "created_utc": "2026-09-08T22:18:09.466185+00:00",
+  "image": "sha256:b4ece5865bac92bd73bffa8cb92aa220a45515159bfb36488de55dca8f40a693",
+  "docker": {
+    "Architecture": "aarch64",
+    "NCPU": 11,
+    "MemTotal": 8214716416,
+    "ServerVersion": "29.7.2",
+    "KernelVersion": "7.0.12-linuxkit"
+  },
+  "parameters": {
+    "seconds": 60,
+    "rate": 600,
+    "snapshot_rate": 60,
+    "rounds": 2,
+    "image": "clickhouse/clickhouse-server:latest",
+    "output": "benchmarks/2026-09-09-batching.json"
+  },
+  "runs": [
+    {
+      "Mode": "legacy",
+      "Database": "poglytics_bench_legacy_0",
+      "ClickHouseVersion": "26.8.2.7",
+      "GoVersion": "go1.27.1",
+      "DurationSeconds": 60,
+      "IngestSeconds": 60.265543666,
+      "TailSeconds": 10,
+      "Rate": 600,
+      "SnapshotRate": 60,
+      "ExpectedRows": 39600,
+      "WriteErrors": 0,
+      "DBCPUSeconds": 12.198742,
+      "DBTailCPUSeconds": 1.325958,
+      "DBIngestCPUPercent": 20.241652622611554,
+      "WriterCPUSeconds": 1.008371,
+      "MaxSubmissionLagMS": 558.929,
+      "Buffer": {
+        "Rows": 0,
+        "Bytes": 0,
+        "PeakRows": 580,
+        "PeakBytes": 600121
+      },
+      "Inserts": 567,
+      "InsertCPUSeconds": 0.976608,
+      "MergeCPUSeconds": 1.035561,
+      "ActiveMerges": 0,
+      "Tables": {
+        "bans": {
+          "Rows": 60,
+          "DistinctRows": 60,
+          "NewParts": 43,
+          "InsertedRows": 60,
+          "Merges": 8,
+          "Checksum": "1224235027300792049",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "bits": {
+          "Rows": 35,
+          "DistinctRows": 35,
+          "NewParts": 28,
+          "InsertedRows": 35,
+          "Merges": 5,
+          "Checksum": "12711334373357367178",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "deleted_messages": {
+          "Rows": 41,
+          "DistinctRows": 41,
+          "NewParts": 34,
+          "InsertedRows": 41,
+          "Merges": 6,
+          "Checksum": "3597035226680122345",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "hosts": {
+          "Rows": 19,
+          "DistinctRows": 19,
+          "NewParts": 19,
+          "InsertedRows": 19,
+          "Merges": 3,
+          "Checksum": "9739496407380024068",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "notices": {
+          "Rows": 120,
+          "DistinctRows": 120,
+          "NewParts": 66,
+          "InsertedRows": 120,
+          "Merges": 13,
+          "Checksum": "6763717413500871173",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "other_messages": {
+          "Rows": 12249,
+          "DistinctRows": 12249,
+          "NewParts": 121,
+          "InsertedRows": 12249,
+          "Merges": 25,
+          "Checksum": "3600004135687014800",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "raids": {
+          "Rows": 44,
+          "DistinctRows": 44,
+          "NewParts": 27,
+          "InsertedRows": 44,
+          "Merges": 5,
+          "Checksum": "3712345906241455832",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "stream_snapshots": {
+          "Rows": 3600,
+          "DistinctRows": 3600,
+          "NewParts": 36,
+          "InsertedRows": 3600,
+          "Merges": 7,
+          "Checksum": "5087359778924744821",
+          "MaxBufferedAgeSeconds": 0.069191791
+        },
+        "subscriptions": {
+          "Rows": 138,
+          "DistinctRows": 138,
+          "NewParts": 72,
+          "InsertedRows": 138,
+          "Merges": 14,
+          "Checksum": "3220404576663423872",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "text_messages": {
+          "Rows": 23294,
+          "DistinctRows": 23294,
+          "NewParts": 121,
+          "InsertedRows": 23294,
+          "Merges": 25,
+          "Checksum": "4606862459617497286",
+          "MaxBufferedAgeSeconds": 0
+        }
+      },
+      "Round": 1
+    },
+    {
+      "Mode": "table",
+      "Database": "poglytics_bench_table_0",
+      "ClickHouseVersion": "26.8.2.7",
+      "GoVersion": "go1.27.1",
+      "DurationSeconds": 60,
+      "IngestSeconds": 60.460404583,
+      "TailSeconds": 10,
+      "Rate": 600,
+      "SnapshotRate": 60,
+      "ExpectedRows": 39600,
+      "WriteErrors": 0,
+      "DBCPUSeconds": 8.698784999999999,
+      "DBTailCPUSeconds": 1.3142680000000002,
+      "DBIngestCPUPercent": 14.387573255581367,
+      "WriterCPUSeconds": 0.433238,
+      "MaxSubmissionLagMS": 137.55,
+      "Buffer": {
+        "Rows": 0,
+        "Bytes": 0,
+        "PeakRows": 3771,
+        "PeakBytes": 4007393
+      },
+      "Inserts": 44,
+      "InsertCPUSeconds": 0.138919,
+      "MergeCPUSeconds": 0.094555,
+      "ActiveMerges": 0,
+      "Tables": {
+        "bans": {
+          "Rows": 60,
+          "DistinctRows": 60,
+          "NewParts": 2,
+          "InsertedRows": 60,
+          "Merges": 0,
+          "Checksum": "1224235027300792049",
+          "MaxBufferedAgeSeconds": 30.321380584
+        },
+        "bits": {
+          "Rows": 35,
+          "DistinctRows": 35,
+          "NewParts": 2,
+          "InsertedRows": 35,
+          "Merges": 0,
+          "Checksum": "12711334373357367178",
+          "MaxBufferedAgeSeconds": 30.011657458
+        },
+        "deleted_messages": {
+          "Rows": 41,
+          "DistinctRows": 41,
+          "NewParts": 2,
+          "InsertedRows": 41,
+          "Merges": 0,
+          "Checksum": "3597035226680122345",
+          "MaxBufferedAgeSeconds": 30.072988166
+        },
+        "hosts": {
+          "Rows": 19,
+          "DistinctRows": 19,
+          "NewParts": 2,
+          "InsertedRows": 19,
+          "Merges": 0,
+          "Checksum": "9739496407380024068",
+          "MaxBufferedAgeSeconds": 30.073702
+        },
+        "notices": {
+          "Rows": 120,
+          "DistinctRows": 120,
+          "NewParts": 2,
+          "InsertedRows": 120,
+          "Merges": 0,
+          "Checksum": "6763717413500871173",
+          "MaxBufferedAgeSeconds": 30.188502375
+        },
+        "other_messages": {
+          "Rows": 12249,
+          "DistinctRows": 12249,
+          "NewParts": 12,
+          "InsertedRows": 12249,
+          "Merges": 2,
+          "Checksum": "3600004135687014800",
+          "MaxBufferedAgeSeconds": 5.236529208
+        },
+        "raids": {
+          "Rows": 44,
+          "DistinctRows": 44,
+          "NewParts": 2,
+          "InsertedRows": 44,
+          "Merges": 0,
+          "Checksum": "3712345906241455832",
+          "MaxBufferedAgeSeconds": 30.110846292
+        },
+        "stream_snapshots": {
+          "Rows": 3600,
+          "DistinctRows": 3600,
+          "NewParts": 6,
+          "InsertedRows": 3600,
+          "Merges": 1,
+          "Checksum": "5087359778924744821",
+          "MaxBufferedAgeSeconds": 10.121787792
+        },
+        "subscriptions": {
+          "Rows": 138,
+          "DistinctRows": 138,
+          "NewParts": 2,
+          "InsertedRows": 138,
+          "Merges": 0,
+          "Checksum": "3220404576663423872",
+          "MaxBufferedAgeSeconds": 30.255836125
+        },
+        "text_messages": {
+          "Rows": 23294,
+          "DistinctRows": 23294,
+          "NewParts": 12,
+          "InsertedRows": 23294,
+          "Merges": 2,
+          "Checksum": "4606862459617497286",
+          "MaxBufferedAgeSeconds": 5.142901542
+        }
+      },
+      "Round": 1
+    },
+    {
+      "Mode": "table",
+      "Database": "poglytics_bench_table_1",
+      "ClickHouseVersion": "26.8.2.7",
+      "GoVersion": "go1.27.1",
+      "DurationSeconds": 60,
+      "IngestSeconds": 60.411293416,
+      "TailSeconds": 10,
+      "Rate": 600,
+      "SnapshotRate": 60,
+      "ExpectedRows": 39600,
+      "WriteErrors": 0,
+      "DBCPUSeconds": 8.534880999999999,
+      "DBTailCPUSeconds": 1.2793370000000017,
+      "DBIngestCPUPercent": 14.127956078059281,
+      "WriterCPUSeconds": 0.44422800000000007,
+      "MaxSubmissionLagMS": 59.297,
+      "Buffer": {
+        "Rows": 0,
+        "Bytes": 0,
+        "PeakRows": 3750,
+        "PeakBytes": 3913940
+      },
+      "Inserts": 44,
+      "InsertCPUSeconds": 0.157483,
+      "MergeCPUSeconds": 0.08737,
+      "ActiveMerges": 0,
+      "Tables": {
+        "bans": {
+          "Rows": 60,
+          "DistinctRows": 60,
+          "NewParts": 2,
+          "InsertedRows": 60,
+          "Merges": 0,
+          "Checksum": "1224235027300792049",
+          "MaxBufferedAgeSeconds": 30.075755
+        },
+        "bits": {
+          "Rows": 35,
+          "DistinctRows": 35,
+          "NewParts": 2,
+          "InsertedRows": 35,
+          "Merges": 0,
+          "Checksum": "12711334373357367178",
+          "MaxBufferedAgeSeconds": 30.01152875
+        },
+        "deleted_messages": {
+          "Rows": 41,
+          "DistinctRows": 41,
+          "NewParts": 2,
+          "InsertedRows": 41,
+          "Merges": 0,
+          "Checksum": "3597035226680122345",
+          "MaxBufferedAgeSeconds": 30.072241584
+        },
+        "hosts": {
+          "Rows": 19,
+          "DistinctRows": 19,
+          "NewParts": 2,
+          "InsertedRows": 19,
+          "Merges": 0,
+          "Checksum": "9739496407380024068",
+          "MaxBufferedAgeSeconds": 30.07253525
+        },
+        "notices": {
+          "Rows": 120,
+          "DistinctRows": 120,
+          "NewParts": 2,
+          "InsertedRows": 120,
+          "Merges": 0,
+          "Checksum": "6763717413500871173",
+          "MaxBufferedAgeSeconds": 30.072863792
+        },
+        "other_messages": {
+          "Rows": 12249,
+          "DistinctRows": 12249,
+          "NewParts": 12,
+          "InsertedRows": 12249,
+          "Merges": 2,
+          "Checksum": "3600004135687014800",
+          "MaxBufferedAgeSeconds": 5.197733583
+        },
+        "raids": {
+          "Rows": 44,
+          "DistinctRows": 44,
+          "NewParts": 2,
+          "InsertedRows": 44,
+          "Merges": 0,
+          "Checksum": "3712345906241455832",
+          "MaxBufferedAgeSeconds": 30.053017708
+        },
+        "stream_snapshots": {
+          "Rows": 3600,
+          "DistinctRows": 3600,
+          "NewParts": 6,
+          "InsertedRows": 3600,
+          "Merges": 1,
+          "Checksum": "5087359778924744821",
+          "MaxBufferedAgeSeconds": 10.173315375
+        },
+        "subscriptions": {
+          "Rows": 138,
+          "DistinctRows": 138,
+          "NewParts": 2,
+          "InsertedRows": 138,
+          "Merges": 0,
+          "Checksum": "3220404576663423872",
+          "MaxBufferedAgeSeconds": 30.067440458
+        },
+        "text_messages": {
+          "Rows": 23294,
+          "DistinctRows": 23294,
+          "NewParts": 12,
+          "InsertedRows": 23294,
+          "Merges": 2,
+          "Checksum": "4606862459617497286",
+          "MaxBufferedAgeSeconds": 5.122959208
+        }
+      },
+      "Round": 2
+    },
+    {
+      "Mode": "legacy",
+      "Database": "poglytics_bench_legacy_1",
+      "ClickHouseVersion": "26.8.2.7",
+      "GoVersion": "go1.27.1",
+      "DurationSeconds": 60,
+      "IngestSeconds": 60.171086792,
+      "TailSeconds": 10,
+      "Rate": 600,
+      "SnapshotRate": 60,
+      "ExpectedRows": 39600,
+      "WriteErrors": 0,
+      "DBCPUSeconds": 12.220846,
+      "DBTailCPUSeconds": 1.3387270000000004,
+      "DBIngestCPUPercent": 20.310163321871084,
+      "WriterCPUSeconds": 1.071472,
+      "MaxSubmissionLagMS": 541.449,
+      "Buffer": {
+        "Rows": 0,
+        "Bytes": 0,
+        "PeakRows": 580,
+        "PeakBytes": 601369
+      },
+      "Inserts": 560,
+      "InsertCPUSeconds": 0.964856,
+      "MergeCPUSeconds": 1.05388,
+      "ActiveMerges": 0,
+      "Tables": {
+        "bans": {
+          "Rows": 60,
+          "DistinctRows": 60,
+          "NewParts": 41,
+          "InsertedRows": 60,
+          "Merges": 8,
+          "Checksum": "1224235027300792049",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "bits": {
+          "Rows": 35,
+          "DistinctRows": 35,
+          "NewParts": 28,
+          "InsertedRows": 35,
+          "Merges": 5,
+          "Checksum": "12711334373357367178",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "deleted_messages": {
+          "Rows": 41,
+          "DistinctRows": 41,
+          "NewParts": 35,
+          "InsertedRows": 41,
+          "Merges": 6,
+          "Checksum": "3597035226680122345",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "hosts": {
+          "Rows": 19,
+          "DistinctRows": 19,
+          "NewParts": 19,
+          "InsertedRows": 19,
+          "Merges": 3,
+          "Checksum": "9739496407380024068",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "notices": {
+          "Rows": 120,
+          "DistinctRows": 120,
+          "NewParts": 64,
+          "InsertedRows": 120,
+          "Merges": 12,
+          "Checksum": "6763717413500871173",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "other_messages": {
+          "Rows": 12249,
+          "DistinctRows": 12249,
+          "NewParts": 120,
+          "InsertedRows": 12249,
+          "Merges": 25,
+          "Checksum": "3600004135687014800",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "raids": {
+          "Rows": 44,
+          "DistinctRows": 44,
+          "NewParts": 31,
+          "InsertedRows": 44,
+          "Merges": 6,
+          "Checksum": "3712345906241455832",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "stream_snapshots": {
+          "Rows": 3600,
+          "DistinctRows": 3600,
+          "NewParts": 36,
+          "InsertedRows": 3600,
+          "Merges": 7,
+          "Checksum": "5087359778924744821",
+          "MaxBufferedAgeSeconds": 0.073827709
+        },
+        "subscriptions": {
+          "Rows": 138,
+          "DistinctRows": 138,
+          "NewParts": 66,
+          "InsertedRows": 138,
+          "Merges": 13,
+          "Checksum": "3220404576663423872",
+          "MaxBufferedAgeSeconds": 0
+        },
+        "text_messages": {
+          "Rows": 23294,
+          "DistinctRows": 23294,
+          "NewParts": 120,
+          "InsertedRows": 23294,
+          "Merges": 25,
+          "Checksum": "4606862459617497286",
+          "MaxBufferedAgeSeconds": 0
+        }
+      },
+      "Round": 2
+    }
+  ]
+}

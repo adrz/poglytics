@@ -31,6 +31,7 @@ func NewIRCConnection(database DatabaseInterface, twitchClient *twitch.Client, s
 		ctx:               ctx,
 		cancel:            cancel,
 		connectedChannels: make(map[string]bool),
+		joinAttempts:      make(map[string]joinAttempt),
 		joinUpdates:       make(chan struct{}, 1),
 		DB:                database,
 		TwitchClient:      twitchClient,

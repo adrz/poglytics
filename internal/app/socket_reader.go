@@ -65,6 +65,8 @@ func (c *IRCConnection) readChat() error {
 				continue
 			}
 
+			c.trackMembership(data)
+
 			// Parse chat message and send to async processing
 			if chatMsg := c.parseIRCMessage(data); chatMsg != nil {
 				// Record message metric
@@ -197,6 +199,7 @@ func (c *IRCConnection) connect() error {
 
 	c.channelsMutex.Lock()
 	clear(c.connectedChannels)
+	clear(c.joinAttempts)
 	c.ListChannels = c.ListChannels[:0]
 	c.NChannels.Store(0)
 	c.channelsMutex.Unlock()

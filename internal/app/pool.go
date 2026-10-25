@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"poglytics-scraper/internal/config"
@@ -14,13 +16,20 @@ import (
 	"poglytics-scraper/internal/twitch"
 )
 
+// connectionStartDelay spaces out new sockets so Twitch never sees a burst of
+// connections, both when the pool is built and when it grows later.
+const connectionStartDelay = 2 * time.Second
+
 // ConnectionPool manages multiple IRC connections to distribute channel load
 type ConnectionPool struct {
 	connections           []*IRCConnection
 	channelsPerConnection int
 	totalChannels         int
 	sharedDB              DatabaseInterface
+	ingestWriter          *db.IngestWriter
 	twitchClient          *twitch.Client
+	joinLimiter           *joinLimiter
+	liveChannels          atomic.Pointer[map[string]bool]
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	mu                    sync.RWMutex
@@ -35,9 +44,10 @@ type ConnectionPool struct {
 }
 
 // NewConnectionPool creates a new connection pool
-func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPool, error) {
-	if totalChannels <= 0 || channelsPerConnection <= 0 {
-		return nil, fmt.Errorf("channel counts must be positive")
+func NewConnectionPool(totalChannels, channelsPerConnection, joinsPerSecond int) (*ConnectionPool, error) {
+	// totalChannels == 0 means "no limit": monitor every channel discovery returns.
+	if totalChannels < 0 || channelsPerConnection <= 0 || joinsPerSecond <= 0 {
+		return nil, fmt.Errorf("channel limit must not be negative; channels per connection and joins per second must be positive")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,6 +59,11 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		return nil, fmt.Errorf("failed to load environment: %v", err)
 	}
 
+	batchOptions, err := config.GetBatchOptions(env)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("invalid batching configuration: %w", err)
+	}
 	dbConfig := config.GetDBConfig(env)
 	dbCfg := &db.DBConfig{
 		Type:     dbConfig["type"],
@@ -67,6 +82,17 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 	}
 
 	slog.Info("Database initialized successfully", "type", dbCfg.Type)
+	ingestWriter, err := db.NewIngestWriter(database, batchOptions, observeDBFlush)
+	if err != nil {
+		database.Close()
+		cancel()
+		return nil, err
+	}
+	slog.Info("Database batching configured", "legacy", batchOptions.Legacy,
+		"message_rows", batchOptions.MessageRows, "message_interval", batchOptions.MessageInterval,
+		"event_rows", batchOptions.EventRows, "event_interval", batchOptions.EventInterval,
+		"snapshot_rows", batchOptions.SnapshotRows, "snapshot_interval", batchOptions.SnapshotInterval,
+		"max_buffer_bytes", batchOptions.MaxBytes)
 
 	// Initialize Twitch API client (shared across all connections)
 	clientID := env["CLIENT_ID"]
@@ -76,7 +102,7 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		cancel()
 		return nil, fmt.Errorf("CLIENT_ID and CLIENT_SECRET must be set")
 	}
-	twitchClient := twitch.NewClientWithDB(clientID, clientSecret, database)
+	twitchClient := twitch.NewClientWithDB(clientID, clientSecret, ingestWriter)
 	if err := twitchClient.GetOAuth(); err != nil {
 		database.Close()
 		cancel()
@@ -90,7 +116,9 @@ func NewConnectionPool(totalChannels, channelsPerConnection int) (*ConnectionPoo
 		channelsPerConnection: channelsPerConnection,
 		totalChannels:         totalChannels,
 		sharedDB:              database,
+		ingestWriter:          ingestWriter,
 		twitchClient:          twitchClient,
+		joinLimiter:           newJoinLimiter(joinsPerSecond),
 		ctx:                   ctx,
 		cancel:                cancel,
 		centralMessageChan:    make(chan *ChatMessage, 100000), // Large centralized buffer
@@ -107,7 +135,7 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 	pool.dbWriterWg.Add(1)
 	go func() {
 		defer pool.dbWriterWg.Done()
-		ticker := time.NewTicker(time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		const maxBatchSize = 500
 		batch := make([]*ChatMessage, 0, maxBatchSize)
@@ -115,14 +143,8 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			if len(batch) == 0 {
 				return
 			}
-			start := time.Now()
-			err := pool.saveChatMessageBatch(batch)
-			metrics.RecordDBBatchInsert(time.Since(start).Seconds(), len(batch), err == nil)
-			if err != nil {
-				// Backends may already have committed part of the batch. Retrying
-				// it here would duplicate those rows without idempotency support.
-				slog.Error("DB batch could not be fully saved", "messages", len(batch), "error", err)
-			}
+			// The writer reports actual persistence and errors through observeDBFlush.
+			_ = pool.saveChatMessageBatch(batch)
 			clear(batch)
 			batch = batch[:0]
 		}
@@ -131,6 +153,8 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 			case msg, ok := <-pool.centralMessageChan:
 				if !ok {
 					flush()
+					_ = pool.ingestWriter.Close()
+					metrics.UpdateDBBufferMetrics(0, 0)
 					metrics.UpdateMessageBufferMetrics(0, cap(pool.centralMessageChan))
 					return
 				}
@@ -138,11 +162,27 @@ func (pool *ConnectionPool) startCentralizedDBWriter() {
 					continue
 				}
 				batch = append(batch, msg)
-				if len(batch) == maxBatchSize {
-					flush()
+				// Drain already available messages without adding another timer delay.
+				// The ingest writer owns the row and age thresholds for each table.
+			drain:
+				for len(batch) < maxBatchSize {
+					select {
+					case next, open := <-pool.centralMessageChan:
+						if !open {
+							break drain
+						}
+						if next != nil {
+							batch = append(batch, next)
+						}
+					default:
+						break drain
+					}
 				}
-			case <-ticker.C:
 				flush()
+			case <-ticker.C:
+				_ = pool.ingestWriter.FlushDue()
+				pending := pool.ingestWriter.Stats()
+				metrics.UpdateDBBufferMetrics(pending.Rows, pending.Bytes)
 				metrics.UpdateMessageBufferMetrics(len(pool.centralMessageChan), cap(pool.centralMessageChan))
 			}
 		}
@@ -186,7 +226,14 @@ func (pool *ConnectionPool) saveChatMessageBatch(messages []*ChatMessage) error 
 		}
 	}
 
-	return pool.sharedDB.SaveChatMessageBatch(dbMessages)
+	return pool.ingestWriter.SaveChatMessageBatch(dbMessages)
+}
+
+func observeDBFlush(s db.FlushStats) {
+	metrics.RecordDBTableFlush(s.Table, s.Reason, s.Rows, s.Duration.Seconds(), s.OldestAge.Seconds(), s.Err == nil)
+	if s.Err != nil {
+		slog.Error("DB batch could not be fully saved", "table", s.Table, "rows", s.Rows, "error", s.Err)
+	}
 }
 
 // Start initializes and starts all connections in the pool
@@ -201,14 +248,8 @@ func (pool *ConnectionPool) Start() error {
 	pool.workerWg.Add(1)
 	pool.mu.Unlock()
 	defer pool.workerWg.Done()
-	// Calculate number of connections needed
-	numConnections := 1 + (pool.totalChannels-1)/pool.channelsPerConnection
 
-	if numConnections == 0 {
-		numConnections = 1
-	}
-
-	slog.Info("Starting connection pool", "connections", numConnections, "channels_per_connection", pool.channelsPerConnection)
+	slog.Info("Starting connection pool", "channels_per_connection", pool.channelsPerConnection, "channel_limit", pool.channelLimitLabel())
 
 	// Discover all channels first
 	slog.Info("Discovering channels")
@@ -220,6 +261,7 @@ func (pool *ConnectionPool) Start() error {
 	if len(allChannels) == 0 {
 		return fmt.Errorf("no channels discovered")
 	}
+	pool.setLiveChannels(allChannels)
 
 	slog.Info("Discovered channels, shuffling for balanced load", "count", len(allChannels))
 
@@ -231,7 +273,12 @@ func (pool *ConnectionPool) Start() error {
 
 	slog.Info("Channels shuffled - load will be distributed evenly across connections")
 
-	// Recalculate channels per connection based on actual discovered channels
+	// Size the pool from what discovery actually returned; rediscovery grows it
+	// later when Twitch brings more channels online.
+	numConnections := 1 + (len(allChannels)-1)/pool.channelsPerConnection
+
+	// Spread the discovered channels evenly rather than filling each connection
+	// to capacity and leaving the last one nearly empty.
 	actualChannelsPerConnection := (len(allChannels) + numConnections - 1) / numConnections
 	if actualChannelsPerConnection == 0 {
 		actualChannelsPerConnection = 1
@@ -240,9 +287,7 @@ func (pool *ConnectionPool) Start() error {
 	slog.Info("Distributing channels across connections", "total_channels", len(allChannels), "connections", numConnections, "channels_per_connection", actualChannelsPerConnection)
 
 	// Create and start each connection with proper spacing
-	connectionDelay := 2 * time.Second // Wait 2 seconds between each connection
-
-	slog.Info("Starting connections", "delay", connectionDelay)
+	slog.Info("Starting connections", "delay", connectionStartDelay)
 
 	for i := 0; i < numConnections; i++ {
 		// Calculate channel slice for this connection based on actual channels
@@ -266,31 +311,14 @@ func (pool *ConnectionPool) Start() error {
 
 		slog.Info("Assigned channels to connection", "connection_id", i, "start", startIdx, "end", endIdx-1, "total", len(connectionChannels))
 
-		// Create IRC connection instance for this pool connection
-		conn := pool.createIRCConnection(i, connectionChannels)
-
-		pool.mu.Lock()
-		if pool.stopping {
-			pool.mu.Unlock()
-			conn.Shutdown()
+		if !pool.launchConnection(connectionChannels) {
 			return pool.ctx.Err()
 		}
-		pool.connections = append(pool.connections, conn)
-		pool.workerWg.Add(1)
-		pool.mu.Unlock()
-
-		slog.Info("Starting connection", "current", i+1, "total", numConnections)
-
-		// Start this connection in a goroutine
-		go func() {
-			defer pool.workerWg.Done()
-			pool.runConnection(i, conn, connectionChannels)
-		}()
 
 		// Wait before starting next connection (except for last one)
 		if i < numConnections-1 {
-			slog.Info("Waiting before starting next connection", "delay", connectionDelay)
-			if !waitContext(pool.ctx, connectionDelay) {
+			slog.Info("Waiting before starting next connection", "delay", connectionStartDelay)
+			if !waitContext(pool.ctx, connectionStartDelay) {
 				return pool.ctx.Err()
 			}
 		}
@@ -318,6 +346,8 @@ func (pool *ConnectionPool) Start() error {
 func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []string) *IRCConnection {
 	conn := NewIRCConnection(pool.sharedDB, pool.twitchClient, pool.centralMessageChan)
 	conn.ID = fmt.Sprintf("conn-%d", connectionID)
+	conn.joinLimiter = pool.joinLimiter
+	conn.isLive = pool.isLive
 
 	// Pre-assign channels to this IRC connection
 	conn.cancel()
@@ -325,6 +355,75 @@ func (pool *ConnectionPool) createIRCConnection(connectionID int, channels []str
 	conn.assignChannels(channels)
 
 	return conn
+}
+
+// launchConnection registers a connection for the given channels and starts its
+// owner goroutine. It reports false when the pool is shutting down.
+func (pool *ConnectionPool) launchConnection(channels []string) bool {
+	pool.mu.Lock()
+	if pool.stopping {
+		pool.mu.Unlock()
+		return false
+	}
+	connectionID := len(pool.connections)
+	conn := pool.createIRCConnection(connectionID, channels)
+	pool.connections = append(pool.connections, conn)
+	pool.workerWg.Add(1)
+	pool.mu.Unlock()
+
+	slog.Info("Starting connection", "connection_id", connectionID, "channels", len(channels))
+
+	go func() {
+		defer pool.workerWg.Done()
+		pool.runConnection(connectionID, conn, channels)
+	}()
+	return true
+}
+
+// growForChannels adds connections for channels no existing socket had room for,
+// so an uncapped pool grows with Twitch instead of dropping the overflow. Starts
+// are spaced exactly like the initial build.
+func (pool *ConnectionPool) growForChannels(channels []string) {
+	if len(channels) == 0 {
+		return
+	}
+
+	slog.Info("Growing connection pool for unassigned channels",
+		"channels", len(channels),
+		"new_connections", 1+(len(channels)-1)/pool.channelsPerConnection)
+
+	for start := 0; start < len(channels); start += pool.channelsPerConnection {
+		end := min(start+pool.channelsPerConnection, len(channels))
+		if !pool.launchConnection(channels[start:end]) {
+			return
+		}
+		if end < len(channels) && !waitContext(pool.ctx, connectionStartDelay) {
+			return
+		}
+	}
+}
+
+// setLiveChannels records what the latest discovery saw streaming, so rejoins
+// after a reconnect restore those chats first.
+func (pool *ConnectionPool) setLiveChannels(channels []string) {
+	live := make(map[string]bool, len(channels))
+	for _, channel := range channels {
+		live[channel] = true
+	}
+	pool.liveChannels.Store(&live)
+}
+
+func (pool *ConnectionPool) isLive(channel string) bool {
+	live := pool.liveChannels.Load()
+	return live != nil && (*live)[channel]
+}
+
+// channelLimitLabel renders the configured cap for logs; zero means no cap.
+func (pool *ConnectionPool) channelLimitLabel() string {
+	if pool.totalChannels <= 0 {
+		return "unlimited"
+	}
+	return strconv.Itoa(pool.totalChannels)
 }
 
 // runConnection runs a single connection
@@ -397,11 +496,16 @@ func reconnectBackoff(consecutiveFailures int) time.Duration {
 }
 
 // discoverAllChannels fetches all channels from Twitch API
-func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error) {
+func (pool *ConnectionPool) discoverAllChannels(minViewer int) (discovered []string, err error) {
 	startTime := time.Now()
 	defer func() {
 		duration := time.Since(startTime).Seconds()
 		metrics.ChannelDiscoveryDuration.Observe(duration)
+		// Discovery usually ends at the viewer floor, so record the count here
+		// rather than on the (now rarely taken) capped exit.
+		if err == nil {
+			metrics.ChannelsDiscovered.Set(float64(len(discovered)))
+		}
 	}()
 
 	var channels []string
@@ -410,7 +514,9 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 	cursor := ""
 	pageSize := 100
 
-	for len(channels) < pool.totalChannels {
+	// A zero limit means "no cap": page until Twitch runs out of live streams or
+	// the viewer floor is reached.
+	for pool.totalChannels <= 0 || len(channels) < pool.totalChannels {
 		slog.Info("Fetching channels", "count_so_far", len(channels))
 		streamsResp, err := pool.twitchClient.GetStreamsContext(pool.ctx, pageSize, cursor)
 		if err != nil {
@@ -425,7 +531,7 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 		for _, stream := range streamsResp.Data {
 			// Stop if we hit channels with fewer than 5 viewers (streams are sorted by viewer count)
 			if stream.ViewerCount < minViewer {
-				slog.Info("Reached channels with < 5 viewers, stopping discovery", "viewers", stream.ViewerCount)
+				slog.Info("Reached channels below the viewer floor, stopping discovery", "viewers", stream.ViewerCount, "min_viewers", minViewer)
 				slog.Info("Final channel count", "count", len(channels))
 				return channels, nil
 			}
@@ -436,7 +542,7 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 				seen[channelName] = true
 			}
 
-			if len(channels) >= pool.totalChannels {
+			if pool.totalChannels > 0 && len(channels) >= pool.totalChannels {
 				break
 			}
 		}
@@ -456,7 +562,6 @@ func (pool *ConnectionPool) discoverAllChannels(minViewer int) ([]string, error)
 		}
 	}
 
-	metrics.ChannelsDiscovered.Set(float64(len(channels)))
 	return channels, nil
 }
 
@@ -554,13 +659,14 @@ func (pool *ConnectionPool) periodicChannelRediscovery() {
 			}
 
 			slog.Info("Rediscovered channels", "count", len(newChannels))
+			pool.setLiveChannels(newChannels)
 
 			// Shuffle for even distribution
 			rand.Shuffle(len(newChannels), func(i, j int) {
 				newChannels[i], newChannels[j] = newChannels[j], newChannels[i]
 			})
 
-			pool.assignDiscoveredChannels(newChannels)
+			pool.growForChannels(pool.assignDiscoveredChannels(newChannels))
 
 			slog.Info("Channel rediscovery and redistribution initiated (staggered joining in progress)")
 		}
@@ -592,11 +698,13 @@ func (pool *ConnectionPool) Shutdown() {
 
 // Assign using desired membership, even when a socket is reconnecting. This
 // prevents duplicates across connections and keeps configured capacity bounded.
-func (pool *ConnectionPool) assignDiscoveredChannels(channels []string) {
+// Channels that no existing socket had room for are returned so the caller can
+// grow the pool; only a configured channel cap drops them.
+func (pool *ConnectionPool) assignDiscoveredChannels(channels []string) []string {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 	if pool.stopping {
-		return
+		return nil
 	}
 	assigned := make(map[string]bool)
 	loads := make([]int, len(pool.connections))
@@ -609,8 +717,13 @@ func (pool *ConnectionPool) assignDiscoveredChannels(channels []string) {
 		conn.channelsMutex.RUnlock()
 	}
 	skipped := 0
+	var unassigned []string
 	for _, channel := range channels {
 		if assigned[channel] {
+			continue
+		}
+		if pool.totalChannels > 0 && len(assigned) >= pool.totalChannels {
+			skipped++
 			continue
 		}
 		best := -1
@@ -619,17 +732,19 @@ func (pool *ConnectionPool) assignDiscoveredChannels(channels []string) {
 				best = i
 			}
 		}
-		if best == -1 || len(assigned) >= pool.totalChannels {
-			skipped++
+		assigned[channel] = true
+		if best == -1 {
+			// Every socket is full; the caller starts more connections for these.
+			unassigned = append(unassigned, channel)
 			continue
 		}
 		pool.connections[best].assignChannels([]string{channel})
 		loads[best]++
-		assigned[channel] = true
 	}
 	if skipped > 0 {
-		slog.Warn("Channel capacity reached; retaining existing assignments", "skipped", skipped)
+		slog.Warn("MAX_CHANNELS reached; retaining existing assignments", "skipped", skipped, "limit", pool.totalChannels)
 	}
+	return unassigned
 }
 
 // GetStats returns aggregated statistics
