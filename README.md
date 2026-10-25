@@ -49,7 +49,7 @@ The scraper uses a connection pool architecture where multiple IRC connections a
    ```env
    CLIENT_ID=your_twitch_client_id
    CLIENT_SECRET=your_twitch_client_secret
-   MAX_CHANNELS=50000
+   MAX_CHANNELS=0
    CHANNELS_PER_CONNECTION=2000
    METRICS_PORT=9091
    ```
@@ -65,9 +65,20 @@ The scraper uses a connection pool architecture where multiple IRC connections a
 2. Build and run the scraper:
 
    ```bash
-   ./scripts/build.sh
+   make build
    ./build/poglytics-scraper
    ```
+
+CH-UI is optional and starts only when explicitly selected:
+
+```bash
+docker compose up -d ch-ui
+```
+
+Open <http://localhost:5521> and log in with the Compose ClickHouse credentials
+(`default` / `changeme`). CH-UI connects to `clickhouse:8123` over the Docker network
+and stores its settings in a named volume. Set `CH_UI_APP_URL` if accessing it at
+a different public URL. Stop it with `docker compose stop ch-ui`.
 
 ### Running the Monitoring Stack
 
@@ -90,15 +101,76 @@ Access:
 |----------|---------|-------------|
 | `CLIENT_ID` | - | Twitch API Client ID |
 | `CLIENT_SECRET` | - | Twitch API Client Secret |
-| `MAX_CHANNELS` | 50000 | Maximum channels to monitor |
+| `MAX_CHANNELS` | 0 | Maximum channels to monitor; `0` monitors every discovered channel |
 | `CHANNELS_PER_CONNECTION` | 2000 | Channels per IRC connection |
+| `JOINS_PER_SECOND` | 50 | JOINs per second across all connections; Twitch silently drops JOINs above roughly 100/s per IP |
 | `METRICS_PORT` | 9091 | Port for Prometheus metrics |
 
 ### Database Configuration
 
-The scraper supports multiple database backends. Configure your choice in the database initialization code.
+Select the backend with `DB_TYPE=clickhouse`, `postgres`, or `sqlite`, and configure
+its connection using the variables in [.env.example](.env.example).
+
+ClickHouse buffers rows separately for each table. A table flushes when either its
+row threshold or the age of its oldest buffered row reaches the configured limit:
+
+| Data | Row threshold | Interval |
+|------|---------------|----------|
+| Text and other messages | `DB_BATCH_MESSAGE_ROWS=5000` | `DB_BATCH_MESSAGE_INTERVAL=5s` |
+| Subscriptions, moderation, raids, bits, notices, hosts | `DB_BATCH_EVENT_ROWS=1000` | `DB_BATCH_EVENT_INTERVAL=30s` |
+| Stream snapshots | `DB_BATCH_SNAPSHOT_ROWS=1000` | `DB_BATCH_SNAPSHOT_INTERVAL=10s` |
+
+`DB_BATCH_MAX_BYTES=33554432` limits estimated payload memory across these buffers.
+Memory pressure flushes the largest buffer early; an oversized row is written
+immediately. This limit excludes the existing central IRC queue and database driver
+allocations, so it is not a limit on total process memory.
+
+Timers are checked every 100ms. Queueing and database write time can add to the
+visibility delay. Graceful shutdown drains both chat and snapshots. A crash can
+lose buffered rows; failed writes are logged and counted without automatic retries,
+because an ambiguous commit could otherwise duplicate data.
+
+Set `DB_BATCH_MODE=legacy` to restore the original 500 mixed messages / one-second
+batching policy and immediate snapshot pages. SQLite and PostgreSQL keep that
+policy by default; `DB_BATCH_MODE=table` opts them into per-table buffering.
+
+The metrics endpoint reports actual completed writes, per-table flush sizes and
+oldest-row ages, plus `twitch_scraper_db_pending_rows` and
+`twitch_scraper_db_pending_bytes` for the additional buffers.
+
+### Reproducing the ingestion benchmark
+
+```bash
+make benchmark
+# Longer or higher-load runs:
+make benchmark BENCH_ARGS='--seconds 120 --rate 3000 --rounds 2'
+```
+
+Requires Python 3, Go, Docker with cgroup v2, and a locally available
+`clickhouse/clickhouse-server:latest` image. `--image` selects another installed
+image. The harness creates a fresh container for each run, limits it to 2 GiB RAM,
+and removes its test data afterward. It never reads `.env`, contacts Twitch, or
+uses the scraper's database. Results are saved to `benchmarks/latest.json`.
+
+The default run compares both batching policies twice in alternating order, using
+600 chat events and 60 snapshots per second for 60 seconds, followed by a 10-second
+merge tail. It measures container CPU time, inserts, new parts, merges, writer CPU,
+buffer peaks and submission delays. It verifies row counts, uniqueness and matching
+content checksums across runs. Generated database IDs are excluded from checksums
+because the existing ID generator depends on batch position.
+
+This measures the database ingestion path with synthetic data. It does not measure
+IRC parsing, channel joins, dashboard queries, or maximum sustainable throughput.
+See [recorded results](benchmarks/2026-09-09-batching.md) for measurements and limitations.
 
 ## Supported Events
+
+### Standalone streamer profile export
+
+Use the dependency-free [Python profile exporter](scripts/STREAMER_PROFILES.md)
+to enrich French-language streamers from `stream_snapshots` with follower counts,
+bios, images, channel details, videos, clips, schedules, and more. It produces
+JSONL/CSV files and can resume interrupted runs independently of the Go scraper.
 
 The scraper captures and stores the following Twitch chat events:
 
@@ -164,20 +236,19 @@ The scraper exposes comprehensive Prometheus metrics:
 ### Building
 
 ```bash
-./scripts/build.sh
+make build
 ```
 
-This creates binaries in the `build/` directory:
-
-- `poglytics-scraper`: Main scraper application
-- `analytics`: Data analysis tools
-- `query-db`: Database query utilities
+This creates `build/poglytics-scraper`. Use `make run` to build and start it,
+`make fmt` to format Go code, or `make clean` to remove the binary.
 
 ### Testing
 
 ```bash
-go test ./...
+make test
 ```
+
+Tests run with the race detector. Use `make check` to also run `go vet`.
 
 ### Code Structure
 

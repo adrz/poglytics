@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"poglytics-scraper/internal/app"
+	"poglytics-scraper/internal/config"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -18,33 +19,46 @@ func main() {
 	slog.SetDefault(logger)
 
 	// Configuration
-	maxChannels := 50000          // Total channels to monitor
-	channelsPerConnection := 2000 // Channels per IRC connection (safe limit for justinfan)
+	maxChannels := 0              // Channel cap; 0 monitors every discovered channel
+	channelsPerConnection := 1500 // Channels per IRC connection (safe limit for justinfan)
+	joinsPerSecond := 50          // Pool-wide JOIN rate; Twitch drops JOINs above ~100/s per IP
 	metricsPort := 9091           // Port for Prometheus metrics endpoint
 
-	// Allow override via environment variables
-	if envMax := os.Getenv("MAX_CHANNELS"); envMax != "" {
-		if val, err := strconv.Atoi(envMax); err == nil {
-			maxChannels = val
+	env, err := config.LoadEnv()
+	if err != nil {
+		logger.Error("Failed to load configuration", "error", err)
+		os.Exit(1)
+	}
+	for key, target := range map[string]*int{
+		"MAX_CHANNELS":            &maxChannels,
+		"CHANNELS_PER_CONNECTION": &channelsPerConnection,
+		"JOINS_PER_SECOND":        &joinsPerSecond,
+		"METRICS_PORT":            &metricsPort,
+	} {
+		if value := env[key]; value != "" {
+			parsed, err := strconv.Atoi(value)
+			// MAX_CHANNELS accepts 0, which means "no limit".
+			minimum := 1
+			if key == "MAX_CHANNELS" {
+				minimum = 0
+			}
+			if err != nil || parsed < minimum || (key == "METRICS_PORT" && parsed > 65535) {
+				logger.Error("Invalid integer configuration", "key", key, "minimum", minimum)
+				os.Exit(1)
+			}
+			*target = parsed
 		}
 	}
 
-	if envPerConn := os.Getenv("CHANNELS_PER_CONNECTION"); envPerConn != "" {
-		if val, err := strconv.Atoi(envPerConn); err == nil {
-			channelsPerConnection = val
-		}
+	// Connection count is decided after discovery, so it is not known yet.
+	channelLimit := "unlimited"
+	if maxChannels > 0 {
+		channelLimit = strconv.Itoa(maxChannels)
 	}
-
-	if envMetricsPort := os.Getenv("METRICS_PORT"); envMetricsPort != "" {
-		if val, err := strconv.Atoi(envMetricsPort); err == nil {
-			metricsPort = val
-		}
-	}
-
 	logger.Info("Starting Twitch chat scraper with connection pooling",
-		"total_channels", maxChannels,
+		"channel_limit", channelLimit,
 		"channels_per_connection", channelsPerConnection,
-		"estimated_connections", (maxChannels+channelsPerConnection-1)/channelsPerConnection,
+		"joins_per_second", joinsPerSecond,
 		"metrics_port", metricsPort)
 
 	// Start Prometheus metrics HTTP server
@@ -57,7 +71,7 @@ func main() {
 	}()
 
 	// Create connection pool
-	pool, err := app.NewConnectionPool(maxChannels, channelsPerConnection)
+	pool, err := app.NewConnectionPool(maxChannels, channelsPerConnection, joinsPerSecond)
 	if err != nil {
 		logger.Error("Failed to create connection pool", "error", err)
 		os.Exit(1)

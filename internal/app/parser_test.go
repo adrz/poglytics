@@ -172,7 +172,7 @@ func TestParseCLEARCHAT(t *testing.T) {
 			commandIdx: 1,
 			expectNil:  false,
 			expected: &ChatMessage{
-				MessageType: "ban",
+				MessageType: "clear_chat",
 				Channel:     "#channel",
 				Tags:        map[string]string{},
 				RawMessage:  ":tmi.twitch.tv CLEARCHAT #channel",

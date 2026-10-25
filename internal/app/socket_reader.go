@@ -2,7 +2,9 @@ package app
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"strconv"
@@ -14,9 +16,8 @@ import (
 
 // readChat reads and processes chat messages from the IRC connection
 func (c *IRCConnection) readChat() error {
-	// Wait for connection
-	for !c.IsConnected {
-		time.Sleep(100 * time.Millisecond)
+	if !c.IsConnected.Load() {
+		return fmt.Errorf("connection is not ready")
 	}
 
 	for {
@@ -24,28 +25,47 @@ func (c *IRCConnection) readChat() error {
 		case <-c.ctx.Done():
 			return c.ctx.Err()
 		default:
-			// Use robust reading method to handle buffer overflows
-			// REDUCED timeout from 120s to 20s to prevent blocking and message bursts
-			// Long timeouts cause messages to accumulate during JOIN operations
 			data, err := c.readLineWithTimeoutRobust(20 * time.Second)
 			if err != nil {
-				// If we get a buffer error that we can't handle, try to continue
-				if strings.Contains(err.Error(), "buffer") || strings.Contains(err.Error(), "slice bounds") {
-					slog.Error("Unrecoverable buffer error in readChat, skipping", "id", c.ID, "error", err)
-					metrics.RecordParseError(c.ID, "buffer_error")
-					// Reset reader and continue
-					c.Reader = bufio.NewReaderSize(c.Connection, 4*1024*1024)
-					continue
-				}
-				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o timeout") {
+				var networkError net.Error
+				if errors.As(err, &networkError) && networkError.Timeout() {
 					metrics.RecordReadTimeout(c.ID)
-					// Timeout is OK during low activity - just continue
 					continue
 				}
-				return fmt.Errorf("error reading from connection: %v", err)
+				return fmt.Errorf("read IRC message: %w", err)
 			}
 
-			c.NMessages++
+			c.NMessages.Add(1)
+
+			// Twitch asks us to reconnect (server maintenance / rebalancing).
+			// Cycle the connection promptly instead of waiting for the EOF that
+			// otherwise follows; the pool reconnects with backoff.
+			if strings.HasPrefix(data, ":tmi.twitch.tv RECONNECT") {
+				slog.Info("Twitch requested RECONNECT, cycling connection", "id", c.ID)
+				metrics.RecordIRCMessage(c.ID, "RECONNECT")
+				return fmt.Errorf("server requested RECONNECT")
+			}
+
+			// Handle PING/PONG BEFORE parsing chat, so a burst of chat traffic
+			// can never delay our PONG. A late PONG gets the connection killed.
+			if strings.HasPrefix(data, "PING ") {
+				pingStart := time.Now()
+				payload := strings.TrimRight(strings.TrimPrefix(data, "PING "), "\r\n")
+				if payload != "" {
+					pongMsg := "PONG " + payload
+					if err := c.send(pongMsg); err != nil {
+						return fmt.Errorf("send PONG: %w", err)
+					} else {
+						// Record ping/pong latency
+						latency := time.Since(pingStart).Seconds()
+						metrics.RecordPingPong(c.ID, latency)
+						metrics.RecordIRCMessage(c.ID, "PING")
+					}
+				}
+				continue
+			}
+
+			c.trackMembership(data)
 
 			// Parse chat message and send to async processing
 			if chatMsg := c.parseIRCMessage(data); chatMsg != nil {
@@ -57,150 +77,144 @@ func (c *IRCConnection) readChat() error {
 					metrics.RecordParsedMessage(c.ID, chatMsg.MessageType)
 				}
 
+				// Record NOTICEs by msg-id: this is Twitch telling us *why* it is
+				// unhappy (rate limits, join failures, suspensions). Ground truth
+				// for debugging disconnects.
+				if chatMsg.MessageType == "notice" {
+					metrics.RecordNotice(c.ID, chatMsg.NoticeMessageID)
+					if throttleNotice(chatMsg.NoticeMessageID) {
+						slog.Warn("Twitch NOTICE (possible throttling)", "id", c.ID, "msg_id", chatMsg.NoticeMessageID, "message", chatMsg.Message)
+					}
+				}
+
 				// Try to send to message channel (non-blocking)
 				select {
 				case c.messageChan <- chatMsg:
 					// Message sent successfully
 				default:
+					metrics.MessagesDropped.Inc()
 					// Channel full - log periodically
-					if c.NMessages%1000 == 0 {
+					if c.NMessages.Load()%1000 == 0 {
 						slog.Warn("Message channel full, dropping messages", "id", c.ID, "len", len(c.messageChan), "cap", cap(c.messageChan))
 					}
 					metrics.RecordParseError(c.ID, "channel_full")
 				}
 			}
-
-			// PING PONG
-			if strings.HasPrefix(data, "PING") {
-				pingStart := time.Now()
-				parts := strings.Split(strings.TrimSpace(data), " ")
-				if len(parts) > 1 {
-					pongMsg := fmt.Sprintf("PONG %s", parts[len(parts)-1])
-					if err := c.send(pongMsg); err != nil {
-						slog.Error("Error sending PONG", "id", c.ID, "error", err)
-					} else {
-						// Record ping/pong latency
-						latency := time.Since(pingStart).Seconds()
-						metrics.RecordPingPong(c.ID, latency)
-						metrics.RecordIRCMessage(c.ID, "PING")
-					}
-				}
-			}
 		}
 	}
 }
 
-// infiniteReadChat continuously reads chat messages with error recovery
+// infiniteReadChat is retained for callers that only need to run a reader.
+// Every terminal error is handled by the connection owner with a fresh socket.
 func (c *IRCConnection) infiniteReadChat() {
-	nFailure := 0
-
-	for !c.IsConnected {
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	slog.Info("Chat reader started", "id", c.ID)
-
-	for {
-		err := c.readChat()
-		if err != nil {
-			nFailure++
-			slog.Error("Error reading chat", "id", c.ID, "error", err)
-
-			// Log the disconnection to file
-			c.logDisconnectionEvent("CONNECTION_ERROR", "N/A", fmt.Sprintf("Connection error: %v", err))
-
-			// Check if it's an EOF or connection closed error
-			isEOF := strings.Contains(err.Error(), "EOF") ||
-				strings.Contains(err.Error(), "connection reset") ||
-				strings.Contains(err.Error(), "broken pipe") ||
-				strings.Contains(err.Error(), "use of closed")
-
-			// If we have EOF or connection errors, return to let pool handle reconnection
-			// (If ID starts with "conn-", we're in a pool)
-			if isEOF {
-				slog.Info("Connection closed by server (EOF), returning for pool to handle reconnection", "id", c.ID)
-				// Need to clear connected channels so they'll be rejoined after pool reconnects
-				c.channelsMutex.Lock()
-				for channel := range c.connectedChannels {
-					delete(c.connectedChannels, channel)
-				}
-				c.channelsMutex.Unlock()
-				return // Let pool handle reconnection
-			}
-
-			time.Sleep(5 * time.Second)
-			continue
-		}
+	if err := c.readChat(); err != nil && c.ctx.Err() == nil {
+		slog.Error("Chat reader stopped", "id", c.ID, "error", err)
 	}
 }
 
-// readLineWithTimeoutRobust reads a line with timeout and handles buffer overflows more gracefully
+// readLineWithTimeoutRobust preserves incomplete lines across read timeouts and
+// bounds memory even when a peer never sends a newline.
 func (c *IRCConnection) readLineWithTimeoutRobust(timeout time.Duration) (string, error) {
-	if c.Connection == nil {
+	c.connectionMu.RLock()
+	socket, reader := c.Connection, c.Reader
+	c.connectionMu.RUnlock()
+	if socket == nil || reader == nil {
 		return "", fmt.Errorf("connection is nil")
 	}
-
-	// Set read deadline
-	c.Connection.SetReadDeadline(time.Now().Add(timeout))
-	defer c.Connection.SetReadDeadline(time.Time{}) // Reset deadline
-
-	// First try with the current reader
-	line, err := c.Reader.ReadBytes('\n')
-	if err == nil {
-		return string(line), nil
+	if err := socket.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
 	}
-	return "", err
+	const maxIRCLineBytes = 64 * 1024
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(c.readPartial)+len(fragment) > maxIRCLineBytes {
+			c.readPartial = nil
+			return "", fmt.Errorf("IRC line exceeds %d bytes", maxIRCLineBytes)
+		}
+		c.readPartial = append(c.readPartial, fragment...)
+		if err == nil {
+			line := string(c.readPartial)
+			c.readPartial = c.readPartial[:0]
+			return line, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return "", err
+	}
 }
 
-// send sends a message to the IRC server
+// throttleNotice reports whether a Twitch NOTICE msg-id indicates we are being
+// rate-limited / throttled - the ground-truth signal behind join/traffic-driven
+// disconnects.
+func throttleNotice(msgID string) bool {
+	switch msgID {
+	case "msg_ratelimit", "msg_rejected", "msg_rejected_mandatory", "unrecognized_cmd":
+		return true
+	}
+	return strings.Contains(msgID, "ratelimit") || strings.Contains(msgID, "rate_limit")
+}
+
+// send sends a message to the IRC server. Writes are serialized (JOIN, PONG and
+// auth all share one socket) and bounded by a deadline so a stalled socket can't
+// block a goroutine forever.
 func (c *IRCConnection) send(message string) error {
-	if c.Connection == nil {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	c.connectionMu.RLock()
+	socket := c.Connection
+	c.connectionMu.RUnlock()
+	if socket == nil {
 		return fmt.Errorf("connection is nil")
 	}
-
-	_, err := c.Connection.Write([]byte(message + "\r\n"))
+	if err := socket.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return err
+	}
+	payload := []byte(message + "\r\n")
+	n, err := socket.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 
-// connect establishes a connection to the Twitch IRC server with exponential backoff retry
+// connect makes one bounded attempt. The pool owns cancellation and backoff.
 func (c *IRCConnection) connect() error {
-	exp := 0
-	connected := false
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	socket, err := dialer.DialContext(c.ctx, "tcp", net.JoinHostPort(c.Server, strconv.Itoa(c.Port)))
+	if err != nil {
+		return err
+	}
+	c.connectionMu.Lock()
+	if err := c.ctx.Err(); err != nil {
+		c.connectionMu.Unlock()
+		_ = socket.Close()
+		return err
+	}
+	c.Connection = socket
+	c.Reader = bufio.NewReaderSize(socket, 64*1024)
+	c.readPartial = nil
+	c.connectionMu.Unlock()
 
-	for !connected {
-		conn, err := net.Dial("tcp", c.Server+":"+strconv.Itoa(c.Port))
-		if err != nil {
-			slog.Info("Connection failed, retrying", "id", c.ID, "retry_in_seconds", 1<<exp)
-			time.Sleep(time.Duration(1<<exp) * time.Second)
-			exp++
-			continue
+	c.channelsMutex.Lock()
+	clear(c.connectedChannels)
+	clear(c.joinAttempts)
+	c.ListChannels = c.ListChannels[:0]
+	c.NChannels.Store(0)
+	c.channelsMutex.Unlock()
+
+	for _, command := range []string{
+		"CAP REQ :twitch.tv/tags twitch.tv/commands",
+		fmt.Sprintf("PASS %s", c.Token),
+		fmt.Sprintf("NICK %s", c.Nickname),
+	} {
+		if err := c.send(command); err != nil {
+			c.closeSocket()
+			return err
 		}
-
-		c.Connection = conn
-		c.Reader = bufio.NewReaderSize(conn, 2*1024*1024) // 2MB buffer instead of default 4KB
-		c.IsConnected = true
-		metrics.UpdateConnectionStatus(c.ID, true)
-		slog.Info("Connected to Twitch IRC", "id", c.ID)
-		connected = true
 	}
-
-	// Request IRC capabilities for tags, commands, and membership
-	// This enables us to receive:
-	// - tags: IRC v3 message tags with metadata
-	// - commands: CLEARCHAT, CLEARMSG, HOSTTARGET, NOTICE, RECONNECT, ROOMSTATE, USERNOTICE, USERSTATE
-	// - membership: JOIN, PART, MODE messages
-	if err := c.send("CAP REQ :twitch.tv/tags twitch.tv/commands"); err != nil {
-		return err
-	}
-
-	// Send authentication
-	if err := c.send(fmt.Sprintf("PASS %s", c.Token)); err != nil {
-		return err
-	}
-
-	if err := c.send(fmt.Sprintf("NICK %s", c.Nickname)); err != nil {
-		return err
-	}
-
+	c.IsConnected.Store(true)
+	metrics.UpdateConnectionStatus(c.ID, true)
 	return nil
 }

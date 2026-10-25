@@ -2,6 +2,7 @@ package twitch
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"poglytics-scraper/internal/db"
@@ -13,7 +14,13 @@ type Client struct {
 	ClientSecret string
 	AccessToken  string
 	HTTPClient   *http.Client
-	DB           db.Database
+	DB           SnapshotSaver
+	tokenMu      sync.Mutex
+	tokenExpires time.Time
+}
+
+type SnapshotSaver interface {
+	SaveStreamSnapshots([]*db.StreamSnapshot) error
 }
 
 // TokenResponse represents the OAuth token response from Twitch
@@ -61,7 +68,7 @@ func NewClient(clientID, clientSecret string) *Client {
 }
 
 // NewClientWithDB creates a new Twitch API client with database support
-func NewClientWithDB(clientID, clientSecret string, database db.Database) *Client {
+func NewClientWithDB(clientID, clientSecret string, database SnapshotSaver) *Client {
 	return &Client{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,

@@ -7,10 +7,14 @@ import (
 
 // NewDatabase creates a new database instance based on the provided configuration
 func NewDatabase(config *DBConfig) (Database, error) {
+	if config == nil {
+		return nil, fmt.Errorf("database configuration is required")
+	}
 	switch config.Type {
 	case "sqlite":
 		db := NewSQLiteDB(config.Path)
 		if err := db.InitDB(); err != nil {
+			db.Close()
 			return nil, fmt.Errorf("failed to initialize SQLite database: %w", err)
 		}
 		return db, nil
@@ -18,6 +22,7 @@ func NewDatabase(config *DBConfig) (Database, error) {
 	case "postgres", "postgresql":
 		db := NewPostgresDB(config)
 		if err := db.InitDB(); err != nil {
+			db.Close()
 			return nil, fmt.Errorf("failed to initialize PostgreSQL database: %w", err)
 		}
 		return db, nil
@@ -25,6 +30,7 @@ func NewDatabase(config *DBConfig) (Database, error) {
 	case "clickhouse":
 		db := NewClickHouseDB(config)
 		if err := db.InitDB(); err != nil {
+			db.Close()
 			return nil, fmt.Errorf("failed to initialize ClickHouse database: %w", err)
 		}
 		return db, nil

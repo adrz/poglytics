@@ -30,6 +30,9 @@ func (s *SQLiteDB) InitDB() error {
 		return fmt.Errorf("failed to open sqlite database: %w", err)
 	}
 
+	// Chat batches and stream discovery share this database. Serialize writes
+	// through one connection to avoid competing SQLite writer transactions.
+	db.SetMaxOpenConns(1)
 	s.db = db
 
 	// Create all tables
@@ -202,7 +205,7 @@ func (s *SQLiteDB) InitDB() error {
 	// Execute table creation
 	for _, tableSQL := range tables {
 		if _, err := s.db.Exec(tableSQL); err != nil {
-			s.db.Close()
+			_ = s.db.Close()
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
@@ -243,22 +246,22 @@ func (s *SQLiteDB) SaveChatMessageBatch(messages interface{}) error {
 	other := []*ChatMessage{}
 
 	for _, msg := range chatMessages {
-		switch msg.MessageType {
-		case "text_message":
+		switch MessageTable(msg.MessageType) {
+		case "text_messages":
 			textMessages = append(textMessages, msg)
-		case "subscription", "resub", "subscription_gift", "mystery_subscription_gift":
+		case "subscriptions":
 			subscriptions = append(subscriptions, msg)
-		case "ban", "timeout":
+		case "bans":
 			bans = append(bans, msg)
-		case "delete_message", "clear_chat":
+		case "deleted_messages":
 			deletedMessages = append(deletedMessages, msg)
-		case "raid":
+		case "raids":
 			raids = append(raids, msg)
-		case "bits", "bits_badge_tier":
+		case "bits":
 			bits = append(bits, msg)
-		case "notice", "user_notice":
+		case "notices":
 			notices = append(notices, msg)
-		case "host_target":
+		case "hosts":
 			hosts = append(hosts, msg)
 		default:
 			other = append(other, msg)
@@ -325,7 +328,7 @@ func (s *SQLiteDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO text_messages
 		(nickname, display_name, user_id, message, channel, timestamp, color, badges, bits_amount, raw_message)
@@ -333,7 +336,7 @@ func (s *SQLiteDB) SaveTextMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		badges := joinStrings(msg.Badges, ",")
@@ -368,7 +371,7 @@ func (s *SQLiteDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO subscriptions
 		(nickname, display_name, user_id, channel, timestamp, message_type, sub_plan, sub_plan_name,
@@ -378,7 +381,7 @@ func (s *SQLiteDB) SaveSubscriptions(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		isGift := 0
@@ -424,7 +427,7 @@ func (s *SQLiteDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bans
 		(channel, timestamp, message_type, target_user, ban_duration, ban_reason, raw_message)
@@ -432,7 +435,7 @@ func (s *SQLiteDB) SaveBans(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -462,7 +465,7 @@ func (s *SQLiteDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO deleted_messages
 		(nickname, channel, timestamp, message, target_message_id, raw_message)
@@ -470,7 +473,7 @@ func (s *SQLiteDB) SaveDeletedMessages(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -499,7 +502,7 @@ func (s *SQLiteDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO raids
 		(channel, timestamp, raider_name, viewer_count, system_message, raw_message)
@@ -507,7 +510,7 @@ func (s *SQLiteDB) SaveRaids(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -536,7 +539,7 @@ func (s *SQLiteDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO bits
 		(nickname, display_name, user_id, channel, timestamp, message_type, bits_amount, message, raw_message)
@@ -544,7 +547,7 @@ func (s *SQLiteDB) SaveBits(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -576,7 +579,7 @@ func (s *SQLiteDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO notices
 		(channel, timestamp, message_type, notice_message_id, message, system_message, raw_message)
@@ -584,7 +587,7 @@ func (s *SQLiteDB) SaveNotices(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -614,7 +617,7 @@ func (s *SQLiteDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO hosts
 		(channel, timestamp, target_user, viewer_count, raw_message)
@@ -622,7 +625,7 @@ func (s *SQLiteDB) SaveHosts(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -650,7 +653,7 @@ func (s *SQLiteDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO other_messages
 		(channel, timestamp, message_type, nickname, message, raw_message)
@@ -658,7 +661,7 @@ func (s *SQLiteDB) SaveOther(messages []*ChatMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, msg := range messages {
 		_, err = stmt.Exec(
@@ -687,7 +690,7 @@ func (s *SQLiteDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`INSERT INTO stream_snapshots
 		(stream_id, user_id, user_login, user_name, game_id, game_name, type, title,
@@ -696,7 +699,7 @@ func (s *SQLiteDB) SaveStreamSnapshots(snapshots []*StreamSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, snapshot := range snapshots {
 		// Convert string slices to comma-separated strings
@@ -739,7 +742,10 @@ func (s *SQLiteDB) Close() {
 	if s.db != nil {
 		// Wait a bit for any pending database operations
 		time.Sleep(100 * time.Millisecond)
-		s.db.Close()
+		err := s.db.Close()
+		if err != nil {
+			slog.Error("Error closing database", "error", err)
+		}
 	}
 }
 
